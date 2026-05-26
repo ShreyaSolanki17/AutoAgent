@@ -10,6 +10,7 @@ from langgraph.graph import StateGraph, END
 
 from backend.agent.state import AgentState
 from backend.agent.prompts import PLANNER_SYSTEM, OBSERVER_SYSTEM
+from backend.tools.registry import execute_tool
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
@@ -69,19 +70,14 @@ def plan_node(state: AgentState) -> AgentState:
 
 # ── Node 2: Act ───────────────────────────────────────────
 def act_node(state: AgentState) -> AgentState:
-    """Execute the chosen tool. Returns a placeholder observation.
-
-    In Step 4, this node will call real tool functions.
-    For now, it returns a stub so the loop structure is testable.
-    """
+    """Execute the chosen tool using the tool registry."""
     tool = state["tool_name"]
     tool_input = state["tool_input"]
 
     if tool == "finish":
         observation = f"Agent is ready to provide the final answer for: {state['user_goal']}"
     else:
-        # Placeholder — real tools wired in Step 4
-        observation = f"[Stub] Tool '{tool}' would run with input: '{tool_input}'"
+        observation = execute_tool(tool, tool_input)
 
     return {
         **state,

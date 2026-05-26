@@ -1,12 +1,11 @@
-"""Quick test: verify the LangGraph agent loop runs end-to-end.
+"""Test: verify the LangGraph agent with real tools.
 """
 
 from backend.agent.graph import run_agent
 
 if __name__ == "__main__":
-    print("=== AutoAgent Loop Test ===\n")
+    print("=== AutoAgent + Real Tools Test ===\n")
 
-    # Simple factual question the LLM can answer without real tools
     goal = "What is the capital of France? Answer in one sentence."
     print(f"User goal: {goal}\n")
 
