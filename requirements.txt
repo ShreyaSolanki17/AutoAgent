@@ -15,5 +15,9 @@ sentence-transformers>=4.0.0
 psycopg2-binary>=2.9.0
 pgvector>=0.3.0
 
+# API
+fastapi>=0.115.0
+uvicorn>=0.34.0
+
 # Config
 python-dotenv>=1.0.0
