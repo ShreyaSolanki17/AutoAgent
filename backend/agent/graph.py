@@ -1,4 +1,4 @@
-"""LangGraph agent — Plan → Act → Observe → (loop or finish).
+"""LangGraph agent — Retrieve Memory → Plan → Act → Observe → (loop or finish).
 """
 
 import os
@@ -11,10 +11,11 @@ from langgraph.graph import StateGraph, END
 from backend.agent.state import AgentState
 from backend.agent.prompts import PLANNER_SYSTEM, OBSERVER_SYSTEM
 from backend.tools.registry import execute_tool
+from backend.memory.store import search_memories, save_memory
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
-MAX_ITERATIONS = 5  # safety limit to prevent infinite loops
+MAX_ITERATIONS = 5
 
 
 def _get_llm() -> ChatGroq:
@@ -28,12 +29,48 @@ def _get_llm() -> ChatGroq:
     )
 
 
+# ── Node 0: Retrieve Memory ────────────────────────────────
+def retrieve_memory_node(state: AgentState) -> AgentState:
+    """Search long-term memory for context relevant to the user's goal.
+
+    Runs once at the start (iteration 0) to inject past context
+    into the planner's prompt.
+    """
+    # Only retrieve on first iteration to avoid redundant calls
+    if state["iterations"] > 0:
+        return state
+
+    try:
+        results = search_memories(state["user_goal"], top_k=3)
+        if results:
+            context_lines = [f"  - {r['content']}" for r in results]
+            memory_context = "Relevant memories from past sessions:\n" + "\n".join(context_lines)
+        else:
+            memory_context = ""
+    except Exception:
+        memory_context = ""
+
+    return {
+        **state,
+        "messages": state["messages"] + [
+            {"role": "system", "content": memory_context}
+        ] if memory_context else state["messages"],
+    }
+
+
 # ── Node 1: Plan ──────────────────────────────────────────
 def plan_node(state: AgentState) -> AgentState:
     """Decide which tool to use next based on the current state."""
     llm = _get_llm()
 
     user_msg = f"User goal: {state['user_goal']}\n"
+
+    # Include memory context if available
+    for msg in state["messages"]:
+        if msg.get("role") == "system" and msg.get("content", "").startswith("Relevant memories"):
+            user_msg = msg["content"] + "\n\n" + user_msg
+            break
+
     if state["observation"]:
         user_msg += f"Previous observation: {state['observation']}\n"
 
@@ -44,7 +81,6 @@ def plan_node(state: AgentState) -> AgentState:
 
     content = response.content.strip()
 
-    # Parse the structured response
     tool_name = "finish"
     tool_input = ""
     reason = content
@@ -90,7 +126,8 @@ def act_node(state: AgentState) -> AgentState:
 
 # ── Node 3: Observe ───────────────────────────────────────
 def observe_node(state: AgentState) -> AgentState:
-    """Evaluate the result. Decide if the agent is done or should loop."""
+    """Evaluate the result. Decide if the agent is done or should loop.
+    Also auto-saves important user facts to long-term memory."""
     llm = _get_llm()
 
     user_msg = (
@@ -118,7 +155,34 @@ def observe_node(state: AgentState) -> AgentState:
     new_state["messages"] = state["messages"] + [
         {"role": "assistant", "content": f"[Observe] {content}"}
     ]
+
+    # Auto-save: if the user goal contains personal facts, remember them
+    _auto_save_memory(state["user_goal"], state["observation"])
+
     return new_state
+
+
+def _auto_save_memory(user_goal: str, observation: str):
+    """Heuristic: save to memory if the goal looks like a personal fact.
+
+    Triggers on patterns like "I like...", "My name is...", "Remember that..."
+    """
+    goal_lower = user_goal.lower().strip()
+    triggers = [
+        "my name is", "i like", "i love", "i prefer",
+        "i work", "i live", "i have", "remember that",
+        "my favorite", "i am", "i'm",
+    ]
+
+    should_save = any(t in goal_lower for t in triggers)
+
+    if should_save:
+        try:
+            # Clean up the fact (remove question marks, trailing punctuation)
+            fact = user_goal.strip().rstrip("?!").strip()
+            save_memory(fact)
+        except Exception:
+            pass  # Don't break the agent if memory save fails
 
 
 # ── Routing logic ─────────────────────────────────────────
@@ -136,11 +200,13 @@ def build_agent():
     """Create and compile the LangGraph agent."""
     graph = StateGraph(AgentState)
 
+    graph.add_node("retrieve_memory", retrieve_memory_node)
     graph.add_node("plan", plan_node)
     graph.add_node("act", act_node)
     graph.add_node("observe", observe_node)
 
-    graph.set_entry_point("plan")
+    graph.set_entry_point("retrieve_memory")
+    graph.add_edge("retrieve_memory", "plan")
     graph.add_edge("plan", "act")
     graph.add_edge("act", "observe")
     graph.add_conditional_edges(

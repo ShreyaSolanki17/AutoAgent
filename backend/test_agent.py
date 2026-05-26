@@ -1,25 +1,44 @@
-"""Test: verify the LangGraph agent with real tools.
+"""Test: verify memory-augmented agent with auto-save and retrieval.
 """
 
 from backend.agent.graph import run_agent
+from backend.memory.store import get_all_memories
 
 if __name__ == "__main__":
-    print("=== AutoAgent + Real Tools Test ===\n")
+    print("=== Memory-Augmented Agent Test ===\n")
 
-    goal = "What is the capital of France? Answer in one sentence."
-    print(f"User goal: {goal}\n")
+    # Session 1: Tell the agent some personal facts
+    print("--- Session 1: Saving personal facts ---")
+    facts = [
+        "My name is Alex",
+        "My favorite programming language is Python",
+        "I have two cats named Luna and Max",
+    ]
 
-    try:
-        result = run_agent(goal)
+    for fact in facts:
+        print(f"\nUser: {fact}")
+        result = run_agent(fact)
+        answer = result.get("final_answer", "(no answer)")
+        print(f"Agent: {answer}")
 
-        print("--- Agent Trace ---")
-        for msg in result["messages"]:
-            print(f"  {msg['content']}")
+    # Check what was saved
+    print("\n--- Memories stored ---")
+    all_mem = get_all_memories()
+    for m in all_mem:
+        print(f"  [{m['id']}] {m['content']}")
 
-        print(f"\n[OK] Final answer: {result.get('final_answer', '(none)')}")
-        print(f"     Iterations: {result['iterations']}")
+    # Session 2: Ask about remembered facts
+    print("\n\n--- Session 2: Retrieving memories ---")
+    questions = [
+        "What is my name?",
+        "What is my favorite programming language?",
+        "Do I have any pets?",
+    ]
 
-    except RuntimeError as e:
-        print(f"[ERROR] {e}")
-    except Exception as e:
-        print(f"[ERROR] {e}")
+    for q in questions:
+        print(f"\nUser: {q}")
+        result = run_agent(q)
+        answer = result.get("final_answer", "(no answer)")
+        print(f"Agent: {answer}")
+
+    print(f"\n[OK] Total memories: {len(all_mem)}")

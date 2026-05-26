@@ -8,7 +8,9 @@ Available tools:
 - wikipedia: Look up factual information on a topic
 - search: Search the web for current information
 - file_read: Read a file from disk
-- file_write: Write content to a file
+- file_write: Write content to a file (format: "filename | content")
+- memory_save: Remember a fact for future sessions (e.g. "User likes Python")
+- memory_search: Recall relevant memories about a topic
 - finish: Use this when you have enough information to answer the user
 
 Respond in this exact format:

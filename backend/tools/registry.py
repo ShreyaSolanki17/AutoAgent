@@ -8,13 +8,16 @@ from backend.tools.search import search
 from backend.tools.wikipedia import lookup
 from backend.tools.calculator import calculate
 from backend.tools.file_io import file_read, file_write
+from backend.tools.memory import memory_save, memory_search
 
 TOOLS = {
-    "search":     lambda inp: search(inp),
-    "wikipedia":  lambda inp: lookup(inp),
-    "calculator": lambda inp: calculate(inp),
-    "file_read":  lambda inp: file_read(inp),
-    "file_write": lambda inp: _parse_and_write(inp),
+    "search":        lambda inp: search(inp),
+    "wikipedia":     lambda inp: lookup(inp),
+    "calculator":    lambda inp: calculate(inp),
+    "file_read":     lambda inp: file_read(inp),
+    "file_write":    lambda inp: _parse_and_write(inp),
+    "memory_save":   lambda inp: memory_save(inp),
+    "memory_search": lambda inp: memory_search(inp),
 }
 
 
