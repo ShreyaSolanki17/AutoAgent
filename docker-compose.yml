@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: autoagent-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-autoagent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-autoagent123}
+      POSTGRES_DB: ${POSTGRES_DB:-autoagent_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+
+volumes:
+  pgdata:
