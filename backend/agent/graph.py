@@ -74,6 +74,16 @@ def plan_node(state: AgentState) -> AgentState:
     if state["observation"]:
         user_msg += f"Previous observation: {state['observation']}\n"
 
+    # Tell the planner which tools have already been tried and what happened
+    used_tools = state.get("used_tools", [])
+    if used_tools:
+        user_msg += "\n⚠️  TOOLS ALREADY TRIED (do NOT repeat these):\n"
+        for entry in used_tools:
+            tool = entry["tool"]
+            snippet = entry["result"][:120].replace("\n", " ")
+            user_msg += f"  - {tool}: returned \"{snippet}...\"\n"
+        user_msg += "\nYou MUST pick a DIFFERENT tool or use 'finish'.\n"
+
     response = llm.invoke([
         {"role": "system", "content": PLANNER_SYSTEM},
         {"role": "user", "content": user_msg},
@@ -115,13 +125,30 @@ def act_node(state: AgentState) -> AgentState:
     else:
         observation = execute_tool(tool, tool_input)
 
+    # Track which tools have been used and their results
+    used_tools = list(state.get("used_tools", []))
+    if tool != "finish":
+        used_tools.append({"tool": tool, "input": tool_input, "result": observation})
+
     return {
         **state,
         "observation": observation,
+        "used_tools": used_tools,
         "messages": state["messages"] + [
             {"role": "assistant", "content": f"[Act] {tool} -> {observation}"}
         ],
     }
+
+
+def _build_fallback_answer(state: AgentState) -> str:
+    """Build a fallback answer when the agent keeps repeating a tool."""
+    used = state.get("used_tools", [])
+    tried = ", ".join(f'"{e["tool"]}"' for e in used)
+    return (
+        f"I searched for information about \"{state['user_goal']}\" using {tried}, "
+        f"but couldn't find a definitive answer. "
+        f"Could you provide more context or rephrase your question?"
+    )
 
 
 # ── Node 3: Observe ───────────────────────────────────────
@@ -130,12 +157,24 @@ def observe_node(state: AgentState) -> AgentState:
     Also auto-saves important user facts to long-term memory."""
     llm = _get_llm()
 
+    used_tools = state.get("used_tools", [])
+    tool_failure_count = sum(1 for e in used_tools if e["tool"] == state["tool_name"])
+
+    # Build the user message with tool history
     user_msg = (
         f"User goal: {state['user_goal']}\n"
         f"Tool used: {state['tool_name']}\n"
         f"Tool result: {state['observation']}\n"
         f"Iterations so far: {state['iterations']}"
     )
+
+    # Warn observer if this tool has already been tried
+    if tool_failure_count > 1:
+        user_msg += (
+            f"\n\n⚠️  WARNING: The tool '{state['tool_name']}' has already been "
+            f"called {tool_failure_count} times.\n"
+            f"You MUST respond with 'DONE: <answer>' — do NOT say CONTINUE."
+        )
 
     response = llm.invoke([
         {"role": "system", "content": OBSERVER_SYSTEM},
@@ -150,7 +189,13 @@ def observe_node(state: AgentState) -> AgentState:
         final_answer = content.split(":", 1)[1].strip()
         new_state["final_answer"] = final_answer
     else:
-        new_state["final_answer"] = ""
+        # SAFETY OVERRIDE: if this tool was already tried once and observer
+        # still says CONTINUE, force a DONE with fallback answer.
+        # This prevents the infinite loop even if the LLM ignores prompt rules.
+        if tool_failure_count >= 1 and state["tool_name"] != "finish":
+            new_state["final_answer"] = _build_fallback_answer(new_state)
+        else:
+            new_state["final_answer"] = ""
 
     new_state["messages"] = state["messages"] + [
         {"role": "assistant", "content": f"[Observe] {content}"}
@@ -233,5 +278,36 @@ def run_agent(user_goal: str) -> AgentState:
         "observation": "",
         "final_answer": "",
         "iterations": 0,
+        "used_tools": [],
     }
-    return agent.invoke(initial_state)
+    result = agent.invoke(initial_state)
+
+    # If the agent hit max iterations without producing an answer, synthesize one
+    if not result.get("final_answer"):
+        llm = _get_llm()
+        trace_summary = "\n".join(
+            msg["content"] for msg in result.get("messages", [])
+            if msg.get("role") == "assistant"
+        )
+        try:
+            synth = llm.invoke([
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a helpful assistant. The agent loop did not produce "
+                        "a direct answer. Based on the trace below, give a concise, "
+                        "friendly response to the user. If it was a greeting, just greet "
+                        "back warmly. If the tools returned no relevant results, honestly "
+                        "say you couldn't find the information. Keep it under 3 sentences."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"User said: {user_goal}\n\nTrace:\n{trace_summary}",
+                },
+            ])
+            result["final_answer"] = synth.content.strip()
+        except Exception:
+            result["final_answer"] = f"I wasn't able to find an answer for: {user_goal}"
+
+    return result

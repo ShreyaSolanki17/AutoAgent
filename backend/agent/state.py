@@ -13,3 +13,4 @@ class AgentState(TypedDict):
     observation: str            # Result returned by the tool
     final_answer: str           # Set when the agent decides it's done
     iterations: int             # How many act-observe cycles have run
+    used_tools: list[dict]      # History of tools called: [{"tool": "wikipedia", "input": "..."}]

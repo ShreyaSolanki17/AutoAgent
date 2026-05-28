@@ -1,15 +1,34 @@
+/**
+ * Home / Chat Page
+ *
+ * Protected by NextAuth — unauthenticated users are redirected to /login.
+ * The navbar shows the logged-in user's name and a Sign Out button.
+ */
+
 import { useState, useRef, useEffect } from "react";
+import { useSession, signOut } from "next-auth/react";
+import { useRouter } from "next/router";
 import axios from "axios";
 
 const API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
 export default function Home() {
+  const { data: session, status } = useSession();
+  const router = useRouter();
+
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [trace, setTrace] = useState([]);
-  const [status, setStatus] = useState("connecting");
+  const [backendStatus, setBackendStatus] = useState("connecting");
   const messagesEndRef = useRef(null);
+
+  // Redirect to /login if unauthenticated
+  useEffect(() => {
+    if (status === "unauthenticated") {
+      router.replace("/login");
+    }
+  }, [status, router]);
 
   // Check backend health on mount
   useEffect(() => {
@@ -19,9 +38,9 @@ export default function Home() {
   async function checkHealth() {
     try {
       await axios.get(`${API_URL}/api/health`);
-      setStatus("connected");
+      setBackendStatus("connected");
     } catch {
-      setStatus("offline");
+      setBackendStatus("offline");
     }
   }
 
@@ -45,7 +64,7 @@ export default function Home() {
         ...prev,
         { role: "agent", content: data.final_answer },
       ]);
-    } catch (err) {
+    } catch {
       setMessages((prev) => [
         ...prev,
         {
@@ -65,23 +84,59 @@ export default function Home() {
     }
   }
 
+  // ── Loading state while session resolves ────────────────
+  if (status === "loading") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-900">
+        <div className="flex items-center gap-3 text-gray-400">
+          <span className="w-5 h-5 border-2 border-gray-500 border-t-blue-500 rounded-full animate-spin" />
+          Loading…
+        </div>
+      </div>
+    );
+  }
+
+  // Don't render the chat UI if there is no session (redirect in progress)
+  if (!session) return null;
+
+  // ── Main UI ──────────────────────────────────────────────
   return (
     <div className="min-h-screen flex flex-col">
-      {/* Header */}
+      {/* Header / Navbar */}
       <header className="bg-gray-800 border-b border-gray-700 px-6 py-4 flex items-center justify-between">
         <h1 className="text-xl font-bold text-white">AutoAgent</h1>
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-gray-400">Backend:</span>
-          <span
-            className={`w-2 h-2 rounded-full ${
-              status === "connected"
-                ? "bg-green-500"
-                : status === "offline"
-                ? "bg-red-500"
-                : "bg-yellow-500"
-            }`}
-          />
-          <span className="text-sm text-gray-400">{status}</span>
+
+        <div className="flex items-center gap-4">
+          {/* Backend status */}
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-gray-400">Backend:</span>
+            <span
+              className={`w-2 h-2 rounded-full ${
+                backendStatus === "connected"
+                  ? "bg-green-500"
+                  : backendStatus === "offline"
+                  ? "bg-red-500"
+                  : "bg-yellow-500"
+              }`}
+            />
+            <span className="text-sm text-gray-400">{backendStatus}</span>
+          </div>
+
+          {/* Divider */}
+          <div className="w-px h-6 bg-gray-600" />
+
+          {/* User info */}
+          <span className="text-sm text-gray-300">
+            Hi, {session.user.name}
+          </span>
+
+          {/* Sign out */}
+          <button
+            onClick={() => signOut({ callbackUrl: "/login" })}
+            className="text-sm text-gray-400 hover:text-white transition-colors px-3 py-1.5 rounded border border-gray-600 hover:border-gray-400"
+          >
+            Sign out
+          </button>
         </div>
       </header>
 
@@ -93,9 +148,14 @@ export default function Home() {
           <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
             {messages.length === 0 && (
               <div className="text-center text-gray-500 mt-20">
-                <p className="text-2xl mb-2">Hi, I'm AutoAgent</p>
-                <p>I can search the web, look up Wikipedia, calculate, and remember our conversations.</p>
-                <p className="mt-4 text-sm">Try: "What is the capital of France?"</p>
+                <p className="text-2xl mb-2">Hi, I&apos;m AutoAgent</p>
+                <p>
+                  I can search the web, look up Wikipedia, calculate, and
+                  remember our conversations.
+                </p>
+                <p className="mt-4 text-sm">
+                  Try: &quot;What is the capital of France?&quot;
+                </p>
               </div>
             )}
 
@@ -163,7 +223,7 @@ export default function Home() {
           <div className="p-4 space-y-3">
             {trace.length === 0 && (
               <p className="text-gray-500 text-sm">
-                Send a message to see the agent's reasoning steps here.
+                Send a message to see the agent&apos;s reasoning steps here.
               </p>
             )}
             {trace.map((step, i) => (
