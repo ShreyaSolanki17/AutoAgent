@@ -1,4 +1,7 @@
 """LangGraph agent — Retrieve Memory → Plan → Act → Observe → (loop or finish).
+
+All memory operations are scoped to a user_id so each user has their own
+private long-term memory space in the shared pgvector table.
 """
 
 import os
@@ -65,6 +68,17 @@ def plan_node(state: AgentState) -> AgentState:
 
     user_msg = f"User goal: {state['user_goal']}\n"
 
+    # Include conversation history (previous Q&A) so the agent can
+    # resolve follow-up questions that reference earlier topics.
+    chat_history = state.get("chat_history", [])
+    if chat_history:
+        user_msg = (
+            "Conversation so far:\n"
+            + "\n".join(f"  {m['role'].capitalize()}: {m['content']}" for m in chat_history)
+            + "\n\n"
+            + user_msg
+        )
+
     # Include memory context if available
     for msg in state["messages"]:
         if msg.get("role") == "system" and msg.get("content", "").startswith("Relevant memories"):
@@ -96,12 +110,26 @@ def plan_node(state: AgentState) -> AgentState:
     reason = content
 
     for line in content.splitlines():
-        if line.startswith("TOOL:"):
+        # Case-insensitive prefix matching for robustness
+        upper_line = line.strip().upper()
+        if upper_line.startswith("TOOL:"):
             tool_name = line.split(":", 1)[1].strip().lower()
-        elif line.startswith("INPUT:"):
+        elif upper_line.startswith("INPUT:"):
             tool_input = line.split(":", 1)[1].strip()
-        elif line.startswith("REASON:"):
+        elif upper_line.startswith("REASON:"):
             reason = line.split(":", 1)[1].strip()
+
+    # If the LLM didn't use the structured format at all, try to detect
+    # a bare tool name or treat the whole response as a finish answer.
+    if tool_name == "finish" and reason == content:
+        # Check if the entire response is just a known tool name
+        known_tools = {"search", "wikipedia", "calculator", "file_read",
+                       "file_write", "memory_save", "memory_search"}
+        stripped = content.strip().lower()
+        if stripped in known_tools:
+            tool_name = stripped
+            tool_input = state["user_goal"]
+            reason = f"Using {tool_name} to find information"
 
     return {
         **state,
@@ -141,14 +169,28 @@ def act_node(state: AgentState) -> AgentState:
 
 
 def _build_fallback_answer(state: AgentState) -> str:
-    """Build a fallback answer when the agent keeps repeating a tool."""
+    """Build a fallback answer when the agent exhausts its tools."""
     used = state.get("used_tools", [])
     tried = ", ".join(f'"{e["tool"]}"' for e in used)
-    return (
-        f"I searched for information about \"{state['user_goal']}\" using {tried}, "
-        f"but couldn't find a definitive answer. "
-        f"Could you provide more context or rephrase your question?"
+
+    # Collect any non-error observations to include partial findings
+    findings = []
+    for entry in used:
+        result = entry.get("result", "")
+        if result and not result.startswith("Error") and not result.startswith("No ") and len(result) > 20:
+            # Extract first meaningful sentence
+            first_line = result.split("\n")[0].strip()
+            if len(first_line) > 10:
+                findings.append(first_line[:200])
+
+    base = (
+        f"I searched using {tried} but couldn't find a definitive answer "
+        f"for your question."
     )
+    if findings:
+        base += " Here's what I found so far:\n" + "\n".join(f"• {f}" for f in findings)
+    base += "\nCould you provide more context or rephrase your question?"
+    return base
 
 
 # ── Node 3: Observe ───────────────────────────────────────
@@ -161,8 +203,21 @@ def observe_node(state: AgentState) -> AgentState:
     tool_failure_count = sum(1 for e in used_tools if e["tool"] == state["tool_name"])
 
     # Build the user message with tool history
-    user_msg = (
-        f"User goal: {state['user_goal']}\n"
+    user_msg = f"User goal: {state['user_goal']}\n"
+
+    # Give the observer the same conversation context the planner gets.
+    # Without this, follow-up questions like "what are his comedy videos"
+    # can't be answered because the observer doesn't know who "his" is.
+    chat_history = state.get("chat_history", [])
+    if chat_history:
+        user_msg = (
+            "Previous conversation:\n"
+            + "\n".join(f"  {m['role'].capitalize()}: {m['content']}" for m in chat_history)
+            + "\n\n"
+            + user_msg
+        )
+
+    user_msg += (
         f"Tool used: {state['tool_name']}\n"
         f"Tool result: {state['observation']}\n"
         f"Iterations so far: {state['iterations']}"
@@ -185,14 +240,14 @@ def observe_node(state: AgentState) -> AgentState:
 
     new_state = {**state, "iterations": state["iterations"] + 1}
 
-    if content.startswith("DONE:"):
+    if content.upper().startswith("DONE:"):
         final_answer = content.split(":", 1)[1].strip()
         new_state["final_answer"] = final_answer
     else:
-        # SAFETY OVERRIDE: if this tool was already tried once and observer
-        # still says CONTINUE, force a DONE with fallback answer.
-        # This prevents the infinite loop even if the LLM ignores prompt rules.
-        if tool_failure_count >= 1 and state["tool_name"] != "finish":
+        # SAFETY OVERRIDE: if this tool has already been tried 2+ times
+        # and observer still says CONTINUE, force a DONE with fallback.
+        # >= 2 (not >= 1) so the agent gets to try a different tool first.
+        if tool_failure_count >= 2 and state["tool_name"] != "finish":
             new_state["final_answer"] = _build_fallback_answer(new_state)
         else:
             new_state["final_answer"] = ""
@@ -202,12 +257,12 @@ def observe_node(state: AgentState) -> AgentState:
     ]
 
     # Auto-save: if the user goal contains personal facts, remember them
-    _auto_save_memory(state["user_goal"], state["observation"])
+    _auto_save_memory(state["user_goal"], state["observation"], user_id=state["user_id"])
 
     return new_state
 
 
-def _auto_save_memory(user_goal: str, observation: str):
+def _auto_save_memory(user_goal: str, observation: str, user_id: str = "default"):
     """Heuristic: save to memory if the goal looks like a personal fact.
 
     Triggers on patterns like "I like...", "My name is...", "Remember that..."
@@ -225,7 +280,7 @@ def _auto_save_memory(user_goal: str, observation: str):
         try:
             # Clean up the fact (remove question marks, trailing punctuation)
             fact = user_goal.strip().rstrip("?!").strip()
-            save_memory(fact)
+            save_memory(fact, user_id=user_id)
         except Exception:
             pass  # Don't break the agent if memory save fails
 
@@ -266,12 +321,14 @@ def build_agent():
     return graph.compile()
 
 
-def run_agent(user_goal: str) -> AgentState:
+def run_agent(user_goal: str, user_id: str = "default", history: list[dict] | None = None) -> AgentState:
     """Convenience function: build graph, run it, return final state."""
     agent = build_agent()
     initial_state: AgentState = {
         "user_goal": user_goal,
+        "user_id": user_id,
         "messages": [],
+        "chat_history": history or [],
         "plan": "",
         "tool_name": "",
         "tool_input": "",

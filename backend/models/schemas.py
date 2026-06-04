@@ -8,6 +8,7 @@ from pydantic import BaseModel, EmailStr
 
 class ChatRequest(BaseModel):
     message: str
+    history: list[dict] = []  # Previous messages: [{"role": "user"|"assistant", "content": "..."}]
 
 
 class ChatResponse(BaseModel):

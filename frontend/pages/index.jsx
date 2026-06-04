@@ -54,9 +54,25 @@ export default function Home() {
     setTrace([]);
 
     try {
-      const res = await axios.post(`${API_URL}/api/chat`, {
-        message: userMessage,
-      });
+      const token = session?.user?.accessToken;
+
+      const headers = {};
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+
+      // Build conversation history from previous messages (last 10 turns
+      // to avoid oversized payloads). Each entry is {role, content}.
+      const history = messages.slice(-10).map((m) => ({
+        role: m.role === "user" ? "user" : "assistant",
+        content: m.content,
+      }));
+
+      const res = await axios.post(
+        `${API_URL}/api/chat`,
+        { message: userMessage, history },
+        { headers },
+      );
 
       const data = res.data;
       setTrace(data.trace || []);

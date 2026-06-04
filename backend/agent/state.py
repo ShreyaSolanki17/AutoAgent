@@ -6,7 +6,9 @@ from typing import TypedDict
 
 class AgentState(TypedDict):
     user_goal: str              # The original task the user wants done
-    messages: list[dict]        # Full conversation history (OpenAI format)
+    user_id: str                # Authenticated user ID (for per-user memory)
+    messages: list[dict]        # Full agent trace (plan/act/observe steps)
+    chat_history: list[dict]    # Previous user/assistant messages from prior turns
     plan: str                   # Current plan: which tool to use and why
     tool_name: str              # Name of the tool selected for this step
     tool_input: str             # Input to pass to the tool

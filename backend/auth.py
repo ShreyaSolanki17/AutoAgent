@@ -14,7 +14,10 @@ import jwt
 import psycopg2
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent / ".env")
+# Read env from the project root so Docker and local dev share one .env
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if (_PROJECT_ROOT / ".env").exists():
+    load_dotenv(_PROJECT_ROOT / ".env")
 
 SECRET_KEY = os.getenv("NEXTAUTH_SECRET", "change-me-to-a-random-string")
 ALGORITHM = "HS256"

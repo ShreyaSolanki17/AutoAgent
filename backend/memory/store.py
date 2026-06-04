@@ -115,11 +115,12 @@ def get_all_memories(user_id: str = "default") -> list[dict]:
         conn.close()
 
 
-def delete_memory(memory_id: int) -> bool:
+def delete_memory(memory_id: int, user_id: str | None = None) -> bool:
     """Delete a memory by ID.
 
     Args:
         memory_id: The memory row ID.
+        user_id: If provided, only delete the memory if it belongs to this user.
 
     Returns:
         True if a row was deleted.
@@ -127,7 +128,13 @@ def delete_memory(memory_id: int) -> bool:
     conn = _get_connection()
     try:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM memories WHERE id = %s", (memory_id,))
+            if user_id:
+                cur.execute(
+                    "DELETE FROM memories WHERE id = %s AND user_id = %s",
+                    (memory_id, user_id),
+                )
+            else:
+                cur.execute("DELETE FROM memories WHERE id = %s", (memory_id,))
             deleted = cur.rowcount > 0
         conn.commit()
         return deleted

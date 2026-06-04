@@ -1,7 +1,8 @@
 """FastAPI route handlers — chat, memories, auth, health.
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from backend.models.schemas import (
     AuthResponse,
@@ -14,7 +15,7 @@ from backend.models.schemas import (
     UserResponse,
 )
 from backend.agent.graph import run_agent
-from backend.memory.store import get_all_memories, delete_memory
+from backend.memory.store import _get_connection, get_all_memories, delete_memory
 from backend.auth import (
     authenticate_user,
     create_user,
@@ -23,14 +24,39 @@ from backend.auth import (
 )
 
 router = APIRouter()
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+) -> dict:
+    """Extract and validate the JWT from the Authorization header.
+
+    Raises 401 if the token is missing or invalid.
+    """
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Missing access token")
+
+    payload = _decode_token(credentials.credentials)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    user = get_user_by_id(payload["sub"])
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    return user
 
 
 # ── Chat ───────────────────────────────────────────────
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(
+    request: ChatRequest,
+    current_user: dict = Depends(get_current_user),
+):
     """Send a message to the agent and get a response."""
-    result = run_agent(request.message)
+    result = run_agent(request.message, user_id=current_user["id"], history=request.history)
 
     trace = [msg["content"] for msg in result.get("messages", [])]
 
@@ -43,9 +69,9 @@ async def chat(request: ChatRequest):
 # ── Memory ─────────────────────────────────────────────
 
 @router.get("/memories", response_model=MemoryListResponse)
-async def list_memories():
-    """List all stored memories."""
-    raw = get_all_memories()
+async def list_memories(current_user: dict = Depends(get_current_user)):
+    """List all stored memories for the current user."""
+    raw = get_all_memories(user_id=current_user["id"])
     memories = [
         MemoryItem(id=m["id"], content=m["content"], created_at=m["created_at"])
         for m in raw
@@ -54,9 +80,14 @@ async def list_memories():
 
 
 @router.delete("/memories/{memory_id}")
-async def remove_memory(memory_id: int):
-    """Delete a memory by ID."""
-    deleted = delete_memory(memory_id)
+async def remove_memory(
+    memory_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a memory by ID (only if it belongs to the current user)."""
+    # Filter by user_id so users cannot delete each other's memories
+    deleted = delete_memory(memory_id, user_id=current_user["id"])
+
     if not deleted:
         return {"error": f"Memory {memory_id} not found"}
     return {"status": "deleted", "id": memory_id}
