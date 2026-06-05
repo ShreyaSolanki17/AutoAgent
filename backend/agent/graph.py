@@ -18,7 +18,8 @@ from backend.memory.store import search_memories, save_memory
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
-MAX_ITERATIONS = 5
+MAX_ITERATIONS = 3
+MAX_OBSERVATION_CHARS = 300  # Truncate tool outputs stored in trace to save tokens
 
 
 def _get_llm() -> ChatGroq:
@@ -88,15 +89,15 @@ def plan_node(state: AgentState) -> AgentState:
     if state["observation"]:
         user_msg += f"Previous observation: {state['observation']}\n"
 
-    # Tell the planner which tools have already been tried and what happened
+    # Tell the planner which tools have already been tried (truncated summaries)
     used_tools = state.get("used_tools", [])
     if used_tools:
-        user_msg += "\n⚠️  TOOLS ALREADY TRIED (do NOT repeat these):\n"
+        user_msg += "\nTools already tried:\n"
         for entry in used_tools:
             tool = entry["tool"]
-            snippet = entry["result"][:120].replace("\n", " ")
-            user_msg += f"  - {tool}: returned \"{snippet}...\"\n"
-        user_msg += "\nYou MUST pick a DIFFERENT tool or use 'finish'.\n"
+            snippet = entry["result"][:80].replace("\n", " ")
+            user_msg += f"  - {tool}: {snippet}…\n"
+        user_msg += "Pick a DIFFERENT tool or use 'finish'.\n"
 
     response = llm.invoke([
         {"role": "system", "content": PLANNER_SYSTEM},
@@ -149,7 +150,7 @@ def act_node(state: AgentState) -> AgentState:
     tool_input = state["tool_input"]
 
     if tool == "finish":
-        observation = f"Agent is ready to provide the final answer for: {state['user_goal']}"
+        observation = f"Respond directly to the user. No tool needed."
     else:
         observation = execute_tool(tool, tool_input)
 
@@ -158,12 +159,15 @@ def act_node(state: AgentState) -> AgentState:
     if tool != "finish":
         used_tools.append({"tool": tool, "input": tool_input, "result": observation})
 
+    # Truncate observation in trace to prevent token bloat across iterations
+    obs_for_trace = observation[:MAX_OBSERVATION_CHARS] + "…" if len(observation) > MAX_OBSERVATION_CHARS else observation
+
     return {
         **state,
         "observation": observation,
         "used_tools": used_tools,
         "messages": state["messages"] + [
-            {"role": "assistant", "content": f"[Act] {tool} -> {observation}"}
+            {"role": "assistant", "content": f"[Act] {tool} -> {obs_for_trace}"}
         ],
     }
 
@@ -202,39 +206,58 @@ def observe_node(state: AgentState) -> AgentState:
     used_tools = state.get("used_tools", [])
     tool_failure_count = sum(1 for e in used_tools if e["tool"] == state["tool_name"])
 
-    # Build the user message with tool history
-    user_msg = f"User goal: {state['user_goal']}\n"
+    # When planner chose "finish", respond directly as a conversationalist
+    if state["tool_name"] == "finish":
+        user_msg = f"User: {state['user_goal']}\n"
+        chat_history = state.get("chat_history", [])
+        if chat_history:
+            user_msg = (
+                "Previous conversation:\n"
+                + "\n".join(f"  {m['role'].capitalize()}: {m['content']}" for m in chat_history)
+                + "\n\n"
+                + user_msg
+            )
+        user_msg += "Respond directly to the user in a friendly, natural way. Be concise (1-2 sentences)."
 
-    # Give the observer the same conversation context the planner gets.
-    # Without this, follow-up questions like "what are his comedy videos"
-    # can't be answered because the observer doesn't know who "his" is.
-    chat_history = state.get("chat_history", [])
-    if chat_history:
-        user_msg = (
-            "Previous conversation:\n"
-            + "\n".join(f"  {m['role'].capitalize()}: {m['content']}" for m in chat_history)
-            + "\n\n"
-            + user_msg
-        )
+        response = llm.invoke([
+            {"role": "system", "content": "You are a friendly, helpful assistant."},
+            {"role": "user", "content": user_msg},
+        ])
+        content = f"DONE: {response.content.strip()}"
+    else:
+        # Build the user message with tool history for normal tool evaluation
+        user_msg = f"User goal: {state['user_goal']}\n"
 
-    user_msg += (
-        f"Tool used: {state['tool_name']}\n"
-        f"Tool result: {state['observation']}\n"
-        f"Iterations so far: {state['iterations']}"
-    )
+        chat_history = state.get("chat_history", [])
+        if chat_history:
+            user_msg = (
+                "Previous conversation:\n"
+                + "\n".join(f"  {m['role'].capitalize()}: {m['content']}" for m in chat_history)
+                + "\n\n"
+                + user_msg
+            )
 
-    # Warn observer if this tool has already been tried
-    if tool_failure_count > 1:
+        # Truncate observation in prompt to save tokens
+        obs_for_prompt = state['observation'][:MAX_OBSERVATION_CHARS] + "…" if len(state['observation']) > MAX_OBSERVATION_CHARS else state['observation']
+
         user_msg += (
-            f"\n\n⚠️  WARNING: The tool '{state['tool_name']}' has already been "
-            f"called {tool_failure_count} times.\n"
-            f"You MUST respond with 'DONE: <answer>' — do NOT say CONTINUE."
+            f"Tool used: {state['tool_name']}\n"
+            f"Tool result: {obs_for_prompt}\n"
+            f"Iterations so far: {state['iterations']}"
         )
 
-    response = llm.invoke([
-        {"role": "system", "content": OBSERVER_SYSTEM},
-        {"role": "user", "content": user_msg},
-    ])
+        if tool_failure_count > 1:
+            user_msg += (
+                f"\n\n⚠️  WARNING: The tool '{state['tool_name']}' has already been "
+                f"called {tool_failure_count} times.\n"
+                f"You MUST respond with 'DONE: <answer>' — do NOT say CONTINUE."
+            )
+
+        response = llm.invoke([
+            {"role": "system", "content": OBSERVER_SYSTEM},
+            {"role": "user", "content": user_msg},
+        ])
+        content = response.content.strip()
 
     content = response.content.strip()
 

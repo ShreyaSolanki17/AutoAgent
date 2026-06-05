@@ -50,13 +50,17 @@ async def get_current_user(
 
 # ── Chat ───────────────────────────────────────────────
 
+MAX_HISTORY_MESSAGES = 10  # Keep last 5 user/assistant exchanges to limit prompt growth
+
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
     request: ChatRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """Send a message to the agent and get a response."""
-    result = run_agent(request.message, user_id=current_user["id"], history=request.history)
+    # Trim history to prevent unbounded prompt growth across turns
+    trimmed_history = request.history[-MAX_HISTORY_MESSAGES:] if request.history else []
+    result = run_agent(request.message, user_id=current_user["id"], history=trimmed_history)
 
     trace = [msg["content"] for msg in result.get("messages", [])]
 
