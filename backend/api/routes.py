@@ -11,11 +11,20 @@ from backend.models.schemas import (
     LoginRequest,
     MemoryItem,
     MemoryListResponse,
+    MemoryStatsResponse,
     RegisterRequest,
     UserResponse,
 )
 from backend.agent.graph import run_agent
-from backend.memory.store import _get_connection, get_all_memories, delete_memory
+from backend.memory.store import (
+    _get_connection,
+    get_all_memories,
+    delete_memory,
+    delete_expired_memories,
+    find_duplicate_groups,
+    merge_duplicate_group,
+    get_memory_stats,
+)
 from backend.auth import (
     authenticate_user,
     create_user,
@@ -73,11 +82,20 @@ async def chat(
 # ── Memory ─────────────────────────────────────────────
 
 @router.get("/memories", response_model=MemoryListResponse)
-async def list_memories(current_user: dict = Depends(get_current_user)):
+async def list_memories(
+    current_user: dict = Depends(get_current_user),
+    include_expired: bool = False,
+):
     """List all stored memories for the current user."""
-    raw = get_all_memories(user_id=current_user["id"])
+    raw = get_all_memories(user_id=current_user["id"], include_expired=include_expired)
     memories = [
-        MemoryItem(id=m["id"], content=m["content"], created_at=m["created_at"])
+        MemoryItem(
+            id=m["id"],
+            content=m["content"],
+            created_at=m["created_at"],
+            updated_at=m.get("updated_at"),
+            expires_at=m.get("expires_at"),
+        )
         for m in raw
     ]
     return MemoryListResponse(memories=memories, total=len(memories))
@@ -89,12 +107,63 @@ async def remove_memory(
     current_user: dict = Depends(get_current_user),
 ):
     """Delete a memory by ID (only if it belongs to the current user)."""
-    # Filter by user_id so users cannot delete each other's memories
     deleted = delete_memory(memory_id, user_id=current_user["id"])
 
     if not deleted:
         return {"error": f"Memory {memory_id} not found"}
     return {"status": "deleted", "id": memory_id}
+
+
+@router.get("/memories/stats", response_model=MemoryStatsResponse)
+async def memory_stats(current_user: dict = Depends(get_current_user)):
+    """Get memory statistics for the current user."""
+    stats = get_memory_stats(user_id=current_user["id"])
+    return MemoryStatsResponse(**stats)
+
+
+@router.post("/memories/cleanup")
+async def cleanup_expired_memories(current_user: dict = Depends(get_current_user)):
+    """Delete all expired memories for the current user.
+
+    Returns the number of deleted memories.
+    """
+    count = delete_expired_memories(user_id=current_user["id"])
+    return {"status": "ok", "deleted": count}
+
+
+@router.get("/memories/dedup/groups")
+async def find_memory_duplicates(
+    current_user: dict = Depends(get_current_user),
+    threshold: float = 0.95,
+):
+    """Find groups of near-duplicate memories.
+
+    Returns groups of memories that are semantically similar
+    above the given threshold (default 0.95).
+    """
+    groups = find_duplicate_groups(user_id=current_user["id"], threshold=threshold)
+    return {"groups": groups, "group_count": len(groups)}
+
+
+@router.post("/memories/dedup/merge")
+async def merge_memory_duplicates(
+    keep_id: int,
+    remove_ids: list[int],
+    current_user: dict = Depends(get_current_user),
+):
+    """Merge a group of duplicate memories.
+
+    Keeps the memory with `keep_id` and deletes all memories
+    in `remove_ids`. All must belong to the current user.
+    """
+    success = merge_duplicate_group(
+        keep_id=keep_id,
+        remove_ids=remove_ids,
+        user_id=current_user["id"],
+    )
+    if not success:
+        raise HTTPException(status_code=404, detail="Keep memory not found or does not belong to you")
+    return {"status": "merged", "kept": keep_id, "removed": remove_ids}
 
 
 # ── Auth ───────────────────────────────────────────────

@@ -9,6 +9,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
 from backend.agent.state import AgentState
@@ -21,15 +22,73 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 MAX_ITERATIONS = 3
 MAX_OBSERVATION_CHARS = 300  # Truncate tool outputs stored in trace to save tokens
 
+# ── LLM Provider Config (free-tier only) ──────────────────
+# All providers are tried in order; first one with a valid key wins.
+# If a provider fails at runtime, the LLM call will raise and the
+# caller (LangGraph node) will surface the error.
+_PROVIDERS = [
+    {
+        "name": "groq",
+        "model": "llama-3.3-70b-versatile",
+        "api_key_env": "GROQ_API_KEY",
+        "base_url": None,  # native Groq SDK via langchain-groq
+    },
+    {
+        "name": "google",
+        "model": "gemini-2.0-flash",
+        "api_key_env": "GOOGLE_API_KEY",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    },
+    {
+        "name": "openrouter",
+        "model": "openai/gpt-oss-20b:free",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "base_url": "https://openrouter.ai/api/v1",
+    },
+]
 
-def _get_llm() -> ChatGroq:
-    api_key = os.getenv("GROQ_API_KEY")
-    if not api_key:
-        raise RuntimeError("GROQ_API_KEY is not set in .env")
-    return ChatGroq(
-        model="llama-3.3-70b-versatile",
-        temperature=0.1,
-        max_tokens=4096,
+
+def _get_llm() -> ChatGroq | ChatOpenAI:
+    """Return the first available LLM client (tries all providers).
+
+    Priority: Groq → Google AI Studio → OpenRouter
+    All are free-tier and use OpenAI-compatible APIs.
+
+    Reloads .env on every call so key changes are picked up
+    without restarting the server.
+
+    Raises:
+        RuntimeError: If no provider API key is configured.
+    """
+    # Reload .env so key changes are picked up without server restart
+    load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env", override=True)
+
+    for provider in _PROVIDERS:
+        api_key = os.getenv(provider["api_key_env"])
+        if not api_key:
+            continue
+
+        if provider["base_url"] is None:
+            # Groq — native langchain-groq
+            return ChatGroq(
+                model=provider["model"],
+                temperature=0.1,
+                max_tokens=4096,
+            )
+        else:
+            # Google / OpenRouter — OpenAI-compatible via langchain-openai
+            return ChatOpenAI(
+                model=provider["model"],
+                temperature=0.1,
+                max_tokens=4096,
+                api_key=api_key,
+                base_url=provider["base_url"],
+            )
+
+    raise RuntimeError(
+        "All LLM providers failed. No API key found.\n"
+        "Set at least one of these in .env: "
+        + ", ".join(p["api_key_env"] for p in _PROVIDERS)
     )
 
 
@@ -45,7 +104,7 @@ def retrieve_memory_node(state: AgentState) -> AgentState:
         return state
 
     try:
-        results = search_memories(state["user_goal"], top_k=3)
+        results = search_memories(state["user_goal"], user_id=state["user_id"], top_k=3)
         if results:
             context_lines = [f"  - {r['content']}" for r in results]
             memory_context = "Relevant memories from past sessions:\n" + "\n".join(context_lines)
@@ -80,10 +139,10 @@ def plan_node(state: AgentState) -> AgentState:
             + user_msg
         )
 
-    # Include memory context if available
+    # Include memory context if available (as background info, not to quote back)
     for msg in state["messages"]:
         if msg.get("role") == "system" and msg.get("content", "").startswith("Relevant memories"):
-            user_msg = msg["content"] + "\n\n" + user_msg
+            user_msg = "Background info about the user (use naturally in conversation, do NOT quote or mention explicitly):\n" + msg["content"] + "\n\n" + user_msg
             break
 
     if state["observation"]:
@@ -217,10 +276,18 @@ def observe_node(state: AgentState) -> AgentState:
                 + "\n\n"
                 + user_msg
             )
-        user_msg += "Respond directly to the user in a friendly, natural way. Be concise (1-2 sentences)."
+        # Include memory context as background (don't quote it back)
+        memory_context = ""
+        for msg in state["messages"]:
+            if msg.get("role") == "system" and msg.get("content", "").startswith("Relevant memories"):
+                memory_context = msg["content"]
+                break
+        if memory_context:
+            user_msg = f"Background about the user (use naturally, never quote or mention explicitly):\n{memory_context}\n\n" + user_msg
+        user_msg += "Respond directly to the user in a friendly, natural way. Be concise (1-2 sentences). Never mention tool results, memory IDs, or internal details."
 
         response = llm.invoke([
-            {"role": "system", "content": "You are a friendly, helpful assistant."},
+            {"role": "system", "content": "You are a friendly, helpful assistant. Never mention tool names, memory IDs, or internal system details in your responses."},
             {"role": "user", "content": user_msg},
         ])
         content = f"DONE: {response.content.strip()}"
@@ -258,8 +325,6 @@ def observe_node(state: AgentState) -> AgentState:
             {"role": "user", "content": user_msg},
         ])
         content = response.content.strip()
-
-    content = response.content.strip()
 
     new_state = {**state, "iterations": state["iterations"] + 1}
 
