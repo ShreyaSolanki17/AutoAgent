@@ -16,6 +16,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 from groq import Groq
 
+from backend.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 # Load .env from project root (two levels up from this file: backend/llm.py -> root)
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
@@ -116,14 +120,28 @@ def call_llm(messages: list[dict[str, str]]) -> str:
                     messages, api_key, provider["model"], provider["base_url"]
                 )
             if len(errors):
-                print(f"[LLM] {provider['name']} succeeded after {len(errors)} failure(s)")
+                logger.warning(
+                    "llm.fallback_success",
+                    provider=provider["name"],
+                    model=provider["model"],
+                    failures_before=errors,
+                )
             else:
-                print(f"[LLM] {provider['name']} responded successfully")
+                logger.info(
+                    "llm.response_success",
+                    provider=provider["name"],
+                    model=provider["model"],
+                )
             return result
         except Exception as e:
             error_msg = f"{provider['name']}: {e}"
             errors.append(error_msg)
-            print(f"[LLM] {error_msg} — trying next provider...")
+            logger.warning(
+                "llm.provider_failed",
+                provider=provider["name"],
+                model=provider["model"],
+                error=str(e),
+            )
             continue
 
     # All providers exhausted

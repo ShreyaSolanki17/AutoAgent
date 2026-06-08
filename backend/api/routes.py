@@ -4,6 +4,10 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
+from backend.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 from backend.models.schemas import (
     AuthResponse,
     ChatRequest,
@@ -24,6 +28,11 @@ from backend.memory.store import (
     find_duplicate_groups,
     merge_duplicate_group,
     get_memory_stats,
+    prune_user_memories,
+    compute_importance,
+    get_cleanup_status,
+    start_auto_cleanup,
+    stop_auto_cleanup,
 )
 from backend.auth import (
     authenticate_user,
@@ -67,11 +76,26 @@ async def chat(
     current_user: dict = Depends(get_current_user),
 ):
     """Send a message to the agent and get a response."""
+    logger.info(
+        "chat.request_received",
+        user_id=current_user["id"],
+        message_length=len(request.message),
+        history_length=len(request.history) if request.history else 0,
+    )
+
     # Trim history to prevent unbounded prompt growth across turns
     trimmed_history = request.history[-MAX_HISTORY_MESSAGES:] if request.history else []
     result = run_agent(request.message, user_id=current_user["id"], history=trimmed_history)
 
     trace = [msg["content"] for msg in result.get("messages", [])]
+
+    logger.info(
+        "chat.response_sent",
+        user_id=current_user["id"],
+        iterations=result["iterations"],
+        tools_used=[e["tool"] for e in result.get("used_tools", [])],
+        answer_length=len(result.get("final_answer", "")),
+    )
 
     return ChatResponse(
         final_answer=result.get("final_answer", ""),
@@ -95,6 +119,8 @@ async def list_memories(
             created_at=m["created_at"],
             updated_at=m.get("updated_at"),
             expires_at=m.get("expires_at"),
+            importance=m.get("importance", 0.5),
+            last_accessed=m.get("last_accessed"),
         )
         for m in raw
     ]
@@ -164,6 +190,50 @@ async def merge_memory_duplicates(
     if not success:
         raise HTTPException(status_code=404, detail="Keep memory not found or does not belong to you")
     return {"status": "merged", "kept": keep_id, "removed": remove_ids}
+
+
+@router.post("/memories/prune")
+async def prune_memories(
+    current_user: dict = Depends(get_current_user),
+    max_memories: int = 200,
+):
+    """Manually trigger memory pruning for the current user.
+
+    Deletes lowest-importance memories until count is under max_memories.
+    High-importance memories (score >= 0.8) are never pruned.
+    """
+    result = prune_user_memories(user_id=current_user["id"], max_memories=max_memories)
+    return {"status": "ok", **result}
+
+
+@router.get("/memories/importance/preview")
+async def preview_importance(content: str):
+    """Preview what importance score a piece of text would receive.
+
+    Useful for debugging / tuning importance patterns.
+    """
+    score = compute_importance(content)
+    return {"content": content, "importance": score}
+
+
+@router.get("/memories/cleanup/status")
+async def cleanup_scheduler_status(current_user: dict = Depends(get_current_user)):
+    """Get the status of the automatic cleanup scheduler."""
+    return get_cleanup_status()
+
+
+@router.post("/memories/cleanup/start")
+async def manual_start_cleanup(current_user: dict = Depends(get_current_user)):
+    """Start the auto cleanup scheduler (admin endpoint)."""
+    start_auto_cleanup()
+    return {"status": "started", **get_cleanup_status()}
+
+
+@router.post("/memories/cleanup/stop")
+async def manual_stop_cleanup(current_user: dict = Depends(get_current_user)):
+    """Stop the auto cleanup scheduler (admin endpoint)."""
+    stop_auto_cleanup()
+    return {"status": "stopped", **get_cleanup_status()}
 
 
 # ── Auth ───────────────────────────────────────────────

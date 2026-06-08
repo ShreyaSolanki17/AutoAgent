@@ -4,10 +4,15 @@ Includes:
 - Similarity-based dedup: skips saving near-duplicate memories, updates
   the existing one's timestamp instead.
 - TTL/expiry: memories auto-expire after 90 days by default.
+- Importance scoring: personal-identity facts score higher than casual ones.
+- Pruning: cap memories per user, evict low-importance + old entries.
 - Cleanup helpers: delete expired memories, merge similar ones.
+- Auto-cleanup scheduler: background job that periodically purges expired/trimmed memories.
 """
 
 import os
+import re
+import threading
 from pathlib import Path
 
 import psycopg2
@@ -21,6 +26,77 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 # ── Tuning constants ──────────────────────────────────────
 DEDUP_SIMILARITY_THRESHOLD = 0.95   # cosine similarity above which two memories are "the same"
 DEFAULT_TTL_DAYS = 90               # memories expire after this many days
+MAX_MEMORIES_PER_USER = 200         # cap: when exceeded, prune lowest-importance entries
+
+# ── Importance scoring patterns ───────────────────────────
+# Higher = more important (identity facts > preferences > casual statements)
+_HIGH_IMPORTANCE_PATTERNS = [
+    r"\bmy name is\b",
+    r"\bi am\b",
+    r"\bi'm\b",
+    r"\bmy birthday\b",
+    r"\bmy email\b",
+]
+_MEDIUM_IMPORTANCE_PATTERNS = [
+    r"\bi like\b",
+    r"\bi love\b",
+    r"\bi prefer\b",
+    r"\bi hate\b",
+    r"\bi enjoy\b",
+    r"\bmy favorite\b",
+    r"\bremember (that|to|this)\b",
+    r"\bi work\b",
+    r"\bi live\b",
+    r"\bi have a\b",
+    r"\bi need\b",
+    r"\bi always\b",
+    r"\bi never\b",
+]
+_LOW_IMPORTANCE_PATTERNS = [
+    r"\bi want\b",
+    r"\bi think\b",
+    r"\bi feel\b",
+    r"\bi might\b",
+    r"\bcan you\b",
+    r"\bplease\b",
+]
+
+_HIGH_IMPORTANCE = 0.9
+_MEDIUM_IMPORTANCE = 0.7
+_LOW_IMPORTANCE = 0.5
+_DEFAULT_IMPORTANCE = 0.3   # no pattern match → likely a one-off query
+
+
+def compute_importance(content: str) -> float:
+    """Compute an importance score (0.0–1.0) for a memory based on content heuristics.
+
+    Scoring tiers:
+    - 0.9 : Identity facts ("My name is…", "I am…")
+    - 0.7 : Preferences / lasting traits ("I like…", "I work at…")
+    - 0.5 : Casual statements ("I want…", "I think…")
+    - 0.3 : No pattern match (likely ephemeral)
+
+    Args:
+        content: The memory text to score.
+
+    Returns:
+        Importance score between 0.0 and 1.0.
+    """
+    text = content.lower().strip()
+
+    for pattern in _HIGH_IMPORTANCE_PATTERNS:
+        if re.search(pattern, text):
+            return _HIGH_IMPORTANCE
+
+    for pattern in _MEDIUM_IMPORTANCE_PATTERNS:
+        if re.search(pattern, text):
+            return _MEDIUM_IMPORTANCE
+
+    for pattern in _LOW_IMPORTANCE_PATTERNS:
+        if re.search(pattern, text):
+            return _LOW_IMPORTANCE
+
+    return _DEFAULT_IMPORTANCE
 
 
 def _get_connection():
@@ -36,22 +112,32 @@ def _get_connection():
     return conn
 
 
-def save_memory(content: str, user_id: str = "default", ttl_days: int = DEFAULT_TTL_DAYS) -> int:
-    """Save a memory with its embedding vector, with dedup.
+def save_memory(
+    content: str,
+    user_id: str = "default",
+    ttl_days: int = DEFAULT_TTL_DAYS,
+    importance_override: float | None = None,
+) -> int:
+    """Save a memory with its embedding vector, with dedup and importance scoring.
 
     Before inserting, searches for an existing memory by the same user
     whose cosine similarity >= DEDUP_SIMILARITY_THRESHOLD.  If found,
     that existing row's content is updated (and its timestamps refreshed)
     instead of inserting a duplicate.
 
+    Importance is auto-computed via content heuristics unless overridden.
+
     Args:
         content: Text content to store.
         user_id: User identifier for filtering.
         ttl_days: Number of days until this memory expires.
+        importance_override: If provided, use this score instead of auto-computing.
 
     Returns:
         The ID of the saved (or updated) memory row.
     """
+    importance = importance_override if importance_override is not None else compute_importance(content)
+
     embedding = embed_text(content)
     vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
     conn = _get_connection()
@@ -72,7 +158,7 @@ def save_memory(content: str, user_id: str = "default", ttl_days: int = DEFAULT_
             row = cur.fetchone()
 
             if row and row[2] >= DEDUP_SIMILARITY_THRESHOLD:
-                # Near-duplicate found — refresh the existing row
+                # Near-duplicate found — refresh the existing row, bump importance
                 existing_id = row[0]
                 cur.execute(
                     """
@@ -80,11 +166,12 @@ def save_memory(content: str, user_id: str = "default", ttl_days: int = DEFAULT_
                     SET content = %s,
                         embedding = %s::vector,
                         updated_at = NOW(),
-                        expires_at = NOW() + INTERVAL '%s days'
+                        expires_at = NOW() + INTERVAL '%s days',
+                        importance_score = GREATEST(importance_score, %s)
                     WHERE id = %s
                     RETURNING id
                     """,
-                    (content, vec_str, ttl_days, existing_id),
+                    (content, vec_str, ttl_days, importance, existing_id),
                 )
                 memory_id = cur.fetchone()[0]
                 conn.commit()
@@ -93,14 +180,18 @@ def save_memory(content: str, user_id: str = "default", ttl_days: int = DEFAULT_
             # ── No duplicate — insert fresh ──
             cur.execute(
                 """
-                INSERT INTO memories (user_id, content, embedding, expires_at)
-                VALUES (%s, %s, %s::vector, NOW() + INTERVAL '%s days')
+                INSERT INTO memories (user_id, content, embedding, expires_at, importance_score)
+                VALUES (%s, %s, %s::vector, NOW() + INTERVAL '%s days', %s)
                 RETURNING id
                 """,
-                (user_id, content, vec_str, ttl_days),
+                (user_id, content, vec_str, ttl_days, importance),
             )
             memory_id = cur.fetchone()[0]
         conn.commit()
+
+        # ── Prune if over cap ──
+        _prune_if_needed(user_id)
+
         return memory_id
     finally:
         conn.close()
@@ -109,34 +200,55 @@ def save_memory(content: str, user_id: str = "default", ttl_days: int = DEFAULT_
 def search_memories(query: str, user_id: str = "default", top_k: int = 5) -> list[dict]:
     """Search memories by semantic similarity (excludes expired memories).
 
+    Results are ranked by a combined score: 70% similarity + 30% importance.
+    Updates last_accessed timestamp on returned memories.
+
     Args:
         query: Search query text.
         user_id: Filter memories for this user.
         top_k: Number of top results to return.
 
     Returns:
-        List of dicts with 'id', 'content', 'similarity' keys.
+        List of dicts with 'id', 'content', 'similarity', 'importance' keys.
     """
     query_embedding = embed_text(query)
     conn = _get_connection()
     try:
         with conn.cursor() as cur:
             vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
+            # Combined ranking: similarity-weighted + importance-boosted
             cur.execute(
                 """
-                SELECT id, content, 1 - (embedding <=> %s::vector) AS similarity
+                SELECT id, content,
+                       1 - (embedding <=> %s::vector) AS similarity,
+                       importance_score
                 FROM memories
                 WHERE user_id = %s
                   AND (expires_at IS NULL OR expires_at > NOW())
-                ORDER BY embedding <=> %s::vector
+                ORDER BY (0.7 * (1 - (embedding <=> %s::vector))
+                          + 0.3 * importance_score) DESC
                 LIMIT %s
                 """,
                 (vec_str, user_id, vec_str, top_k),
             )
             rows = cur.fetchall()
 
+            # Update last_accessed for returned memories
+            ids = [row[0] for row in rows]
+            if ids:
+                cur.execute(
+                    "UPDATE memories SET last_accessed = NOW() WHERE id = ANY(%s)",
+                    (ids,),
+                )
+                conn.commit()
+
         return [
-            {"id": row[0], "content": row[1], "similarity": round(row[2], 4)}
+            {
+                "id": row[0],
+                "content": row[1],
+                "similarity": round(row[2], 4),
+                "importance": round(row[3], 2) if row[3] is not None else 0.5,
+            }
             for row in rows
         ]
     finally:
@@ -144,30 +256,34 @@ def search_memories(query: str, user_id: str = "default", top_k: int = 5) -> lis
 
 
 def get_all_memories(user_id: str = "default", include_expired: bool = False) -> list[dict]:
-    """Get all memories for a user, newest first.
+    """Get all memories for a user, ranked by importance then recency.
 
     Args:
         user_id: User identifier.
         include_expired: If True, also return expired memories.
 
     Returns:
-        List of dicts with 'id', 'content', 'created_at', 'updated_at', 'expires_at' keys.
+        List of dicts with 'id', 'content', 'created_at', 'updated_at',
+        'expires_at', 'importance', 'last_accessed' keys.
     """
     conn = _get_connection()
     try:
         with conn.cursor() as cur:
             if include_expired:
                 cur.execute(
-                    """SELECT id, content, created_at, updated_at, expires_at
-                    FROM memories WHERE user_id = %s ORDER BY created_at DESC""",
+                    """SELECT id, content, created_at, updated_at, expires_at,
+                              importance_score, last_accessed
+                    FROM memories WHERE user_id = %s
+                    ORDER BY importance_score DESC, created_at DESC""",
                     (user_id,),
                 )
             else:
                 cur.execute(
-                    """SELECT id, content, created_at, updated_at, expires_at
+                    """SELECT id, content, created_at, updated_at, expires_at,
+                              importance_score, last_accessed
                     FROM memories
                     WHERE user_id = %s AND (expires_at IS NULL OR expires_at > NOW())
-                    ORDER BY created_at DESC""",
+                    ORDER BY importance_score DESC, created_at DESC""",
                     (user_id,),
                 )
             rows = cur.fetchall()
@@ -179,6 +295,8 @@ def get_all_memories(user_id: str = "default", include_expired: bool = False) ->
                 "created_at": str(row[2]),
                 "updated_at": str(row[3]) if row[3] else None,
                 "expires_at": str(row[4]) if row[4] else None,
+                "importance": round(row[5], 2) if row[5] is not None else 0.5,
+                "last_accessed": str(row[6]) if row[6] else None,
             }
             for row in rows
         ]
@@ -365,7 +483,7 @@ def get_memory_stats(user_id: str) -> dict:
     """Get memory statistics for a user.
 
     Returns:
-        Dict with 'total', 'expired', 'active' counts.
+        Dict with 'total', 'expired', 'active', 'avg_importance' counts.
     """
     conn = _get_connection()
     try:
@@ -382,10 +500,142 @@ def get_memory_stats(user_id: str) -> dict:
             )
             expired = cur.fetchone()[0]
 
+            cur.execute(
+                "SELECT COALESCE(AVG(importance_score), 0) FROM memories WHERE user_id = %s",
+                (user_id,),
+            )
+            avg_importance = cur.fetchone()[0]
+
         return {
             "total": total,
             "expired": expired,
             "active": total - expired,
+            "avg_importance": round(float(avg_importance), 3),
         }
     finally:
         conn.close()
+
+
+# ── Pruning ───────────────────────────────────────────────
+
+def _prune_if_needed(user_id: str, max_memories: int = MAX_MEMORIES_PER_USER) -> int:
+    """Evict low-importance memories if the user exceeds the cap.
+
+    Strategy: delete the lowest-importance, oldest memories first
+    until count is back under the cap. Never prunes memories with
+    importance >= 0.8 (identity facts are protected).
+
+    Args:
+        user_id: User whose memories to prune.
+        max_memories: Maximum allowed active memories.
+
+    Returns:
+        Number of memories pruned.
+    """
+    conn = _get_connection()
+    try:
+        with conn.cursor() as cur:
+            # Count active (non-expired) memories
+            cur.execute(
+                """SELECT COUNT(*) FROM memories
+                WHERE user_id = %s AND (expires_at IS NULL OR expires_at > NOW())""",
+                (user_id,),
+            )
+            active_count = cur.fetchone()[0]
+
+            if active_count <= max_memories:
+                return 0
+
+            to_delete = active_count - max_memories
+
+            # Delete lowest-importance, oldest first — protect high-importance (>= 0.8)
+            cur.execute(
+                """DELETE FROM memories
+                WHERE id IN (
+                    SELECT id FROM memories
+                    WHERE user_id = %s
+                      AND (expires_at IS NULL OR expires_at > NOW())
+                      AND importance_score < 0.8
+                    ORDER BY importance_score ASC, last_accessed ASC NULLS FIRST
+                    LIMIT %s
+                )
+                RETURNING id""",
+                (user_id, to_delete),
+            )
+            pruned = cur.rowcount
+        conn.commit()
+        return pruned
+    finally:
+        conn.close()
+
+
+def prune_user_memories(user_id: str, max_memories: int = MAX_MEMORIES_PER_USER) -> dict:
+    """Public API for manual pruning. See _prune_if_needed.
+
+    Returns:
+        Dict with 'pruned' count and 'remaining' count.
+    """
+    pruned = _prune_if_needed(user_id, max_memories)
+    stats = get_memory_stats(user_id)
+    return {"pruned": pruned, "remaining": stats["active"]}
+
+
+# ── Auto-cleanup scheduler ────────────────────────────────
+
+_cleanup_timer: threading.Timer | None = None
+_CLEANUP_INTERVAL_SECONDS = 3600  # run every hour
+_cleanup_started = False
+
+
+def _cleanup_job():
+    """Background job: delete expired memories globally, then start next timer."""
+    global _cleanup_timer
+    try:
+        deleted = delete_expired_memories()
+        if deleted > 0:
+            from backend.logging_config import get_logger
+            logger = get_logger(__name__)
+            logger.info("memory.auto_cleanup", deleted=deleted)
+    except Exception:
+        pass  # Never crash the scheduler — just skip this run
+    finally:
+        # Schedule next run
+        _cleanup_timer = threading.Timer(_CLEANUP_INTERVAL_SECONDS, _cleanup_job)
+        _cleanup_timer.daemon = True
+        _cleanup_timer.start()
+
+
+def start_auto_cleanup():
+    """Start the background cleanup scheduler. Idempotent — safe to call multiple times.
+
+    Spawns a daemon timer that runs every hour to purge expired memories.
+    The thread is marked daemon so it won't prevent the app from shutting down.
+    """
+    global _cleanup_started, _cleanup_timer
+    if _cleanup_started:
+        return
+    _cleanup_started = True
+    _cleanup_timer = threading.Timer(_CLEANUP_INTERVAL_SECONDS, _cleanup_job)
+    _cleanup_timer.daemon = True
+    _cleanup_timer.start()
+
+
+def stop_auto_cleanup():
+    """Stop the background cleanup scheduler."""
+    global _cleanup_started, _cleanup_timer
+    if _cleanup_timer:
+        _cleanup_timer.cancel()
+        _cleanup_timer = None
+    _cleanup_started = False
+
+
+def get_cleanup_status() -> dict:
+    """Check the scheduler status.
+
+    Returns:
+        Dict with 'running' bool and 'interval_seconds'.
+    """
+    return {
+        "running": _cleanup_started,
+        "interval_seconds": _CLEANUP_INTERVAL_SECONDS,
+    }

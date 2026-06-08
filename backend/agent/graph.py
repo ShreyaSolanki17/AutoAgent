@@ -5,6 +5,7 @@ private long-term memory space in the shared pgvector table.
 """
 
 import os
+import time
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -16,6 +17,9 @@ from backend.agent.state import AgentState
 from backend.agent.prompts import PLANNER_SYSTEM, OBSERVER_SYSTEM
 from backend.tools.registry import execute_tool
 from backend.memory.store import search_memories, save_memory
+from backend.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
@@ -411,6 +415,15 @@ def build_agent():
 
 def run_agent(user_goal: str, user_id: str = "default", history: list[dict] | None = None) -> AgentState:
     """Convenience function: build graph, run it, return final state."""
+    start_time = time.time()
+
+    logger.info(
+        "agent.run_started",
+        user_id=user_id,
+        goal=user_goal[:100],
+        history_length=len(history) if history else 0,
+    )
+
     agent = build_agent()
     initial_state: AgentState = {
         "user_goal": user_goal,
@@ -429,6 +442,12 @@ def run_agent(user_goal: str, user_id: str = "default", history: list[dict] | No
 
     # If the agent hit max iterations without producing an answer, synthesize one
     if not result.get("final_answer"):
+        logger.warning(
+            "agent.max_iterations_reached",
+            user_id=user_id,
+            iterations=result["iterations"],
+            tools_used=[e["tool"] for e in result.get("used_tools", [])],
+        )
         llm = _get_llm()
         trace_summary = "\n".join(
             msg["content"] for msg in result.get("messages", [])
@@ -454,5 +473,15 @@ def run_agent(user_goal: str, user_id: str = "default", history: list[dict] | No
             result["final_answer"] = synth.content.strip()
         except Exception:
             result["final_answer"] = f"I wasn't able to find an answer for: {user_goal}"
+
+    elapsed = round(time.time() - start_time, 3)
+    logger.info(
+        "agent.run_completed",
+        user_id=user_id,
+        iterations=result["iterations"],
+        tools_used=[e["tool"] for e in result.get("used_tools", [])],
+        elapsed_seconds=elapsed,
+        answer_length=len(result.get("final_answer", "")),
+    )
 
     return result

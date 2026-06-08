@@ -24,6 +24,8 @@ class MemoryItem(BaseModel):
     created_at: str
     updated_at: str | None = None
     expires_at: str | None = None
+    importance: float = 0.5
+    last_accessed: str | None = None
 
 
 class MemoryListResponse(BaseModel):
@@ -35,6 +37,7 @@ class MemoryStatsResponse(BaseModel):
     total: int
     expired: int
     active: int
+    avg_importance: float = 0.0
 
 
 # ── Auth ──────────────────────────────────────────────
