@@ -35,6 +35,7 @@ from backend.memory.store import (
     stop_auto_cleanup,
 )
 from backend.middleware.safety import sanitize_input, filter_output, _MAX_MESSAGE_LENGTH, _MAX_HISTORY_LENGTH
+from backend.middleware.usage import record_request, get_usage_stats, get_cost
 from backend.auth import (
     authenticate_user,
     create_user,
@@ -127,6 +128,20 @@ async def chat(
         )
         trace = ["[Output filtered for safety]"]
 
+    # ── Record usage analytics ──
+    usage = result.get("usage", {})
+    record_request(
+        user_id=current_user["id"],
+        endpoint="/api/chat",
+        provider=usage.get("provider") or None,
+        model=usage.get("model") or None,
+        input_tokens=usage.get("input_tokens", 0),
+        output_tokens=usage.get("output_tokens", 0),
+        cost_usd=usage.get("cost_usd", 0.0),
+        response_time_ms=usage.get("response_time_ms", 0),
+        status_code=200,
+    )
+
     logger.info(
         "chat.response_sent",
         user_id=current_user["id"],
@@ -134,6 +149,10 @@ async def chat(
         tools_used=[e["tool"] for e in result.get("used_tools", [])],
         answer_length=len(filtered_answer),
         filtered=was_filtered,
+        input_tokens=usage.get("input_tokens", 0),
+        output_tokens=usage.get("output_tokens", 0),
+        cost_usd=usage.get("cost_usd", 0.0),
+        response_time_ms=usage.get("response_time_ms", 0),
     )
 
     return ChatResponse(
@@ -273,6 +292,42 @@ async def manual_stop_cleanup(current_user: dict = Depends(get_current_user)):
     """Stop the auto cleanup scheduler (admin endpoint)."""
     stop_auto_cleanup()
     return {"status": "stopped", **get_cleanup_status()}
+
+
+# ── Usage Analytics ─────────────────────────────────────
+
+@router.get("/usage/stats")
+async def usage_stats(
+    current_user: dict = Depends(get_current_user),
+    days: int = 7,
+):
+    """Get usage analytics for the current user.
+
+    Returns token counts, costs, response times, and per-day breakdown.
+    """
+    stats = get_usage_stats(user_id=current_user["id"], days=days)
+    return stats
+
+
+@router.get("/usage/cost/estimate")
+async def cost_estimate(
+    input_tokens: int,
+    output_tokens: int,
+    provider: str = "groq",
+    model: str = "llama-3.3-70b-versatile",
+):
+    """Estimate the cost of an LLM call without making it.
+
+    Useful for frontend cost previews.
+    """
+    cost = get_cost(provider, model, input_tokens, output_tokens)
+    return {
+        "provider": provider,
+        "model": model,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "estimated_cost_usd": cost,
+    }
 
 
 # ── Auth ───────────────────────────────────────────────

@@ -414,8 +414,12 @@ def build_agent():
 
 
 def run_agent(user_goal: str, user_id: str = "default", history: list[dict] | None = None) -> AgentState:
-    """Convenience function: build graph, run it, return final state."""
+    """Convenience function: build graph, run it, return final state with usage stats."""
     start_time = time.time()
+    total_input_tokens = 0
+    total_output_tokens = 0
+    provider_used = ""
+    model_used = ""
 
     logger.info(
         "agent.run_started",
@@ -437,6 +441,7 @@ def run_agent(user_goal: str, user_id: str = "default", history: list[dict] | No
         "final_answer": "",
         "iterations": 0,
         "used_tools": [],
+        "usage": {"input_tokens": 0, "output_tokens": 0, "provider": "", "model": "", "cost_usd": 0.0},
     }
     result = agent.invoke(initial_state)
 
@@ -471,16 +476,44 @@ def run_agent(user_goal: str, user_id: str = "default", history: list[dict] | No
                 },
             ])
             result["final_answer"] = synth.content.strip()
+            # Count fallback synthesis tokens
+            if hasattr(synth, 'usage_metadata') and synth.usage_metadata:
+                total_input_tokens += synth.usage_metadata.get("input_tokens", 0)
+                total_output_tokens += synth.usage_metadata.get("output_tokens", 0)
         except Exception:
             result["final_answer"] = f"I wasn't able to find an answer for: {user_goal}"
 
-    elapsed = round(time.time() - start_time, 3)
+    elapsed_ms = round((time.time() - start_time) * 1000)
+
+    # Detect which provider/model was used
+    for provider_cfg in _PROVIDERS:
+        if os.getenv(provider_cfg["api_key_env"]):
+            provider_used = provider_cfg["name"]
+            model_used = provider_cfg["model"]
+            break
+
+    # Calculate cost
+    from backend.middleware.usage import get_cost
+    cost = get_cost(provider_used, model_used, total_input_tokens, total_output_tokens)
+
+    result["usage"] = {
+        "input_tokens": total_input_tokens,
+        "output_tokens": total_output_tokens,
+        "provider": provider_used,
+        "model": model_used,
+        "cost_usd": cost,
+        "response_time_ms": elapsed_ms,
+    }
+
     logger.info(
         "agent.run_completed",
         user_id=user_id,
         iterations=result["iterations"],
         tools_used=[e["tool"] for e in result.get("used_tools", [])],
-        elapsed_seconds=elapsed,
+        elapsed_ms=elapsed_ms,
+        input_tokens=total_input_tokens,
+        output_tokens=total_output_tokens,
+        cost_usd=cost,
         answer_length=len(result.get("final_answer", "")),
     )
 
