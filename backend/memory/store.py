@@ -24,9 +24,12 @@ from backend.memory.embeddings import embed_text
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 # ── Tuning constants ──────────────────────────────────────
-DEDUP_SIMILARITY_THRESHOLD = 0.95   # cosine similarity above which two memories are "the same"
+DEDUP_SIMILARITY_THRESHOLD = 0.95   # Tier 1: near-identical — refresh existing row
+MERGE_SIMILARITY_THRESHOLD = 0.85   # Tier 2: semantic duplicate — merge (keep longer + bump importance)
 DEFAULT_TTL_DAYS = 90               # memories expire after this many days
 MAX_MEMORIES_PER_USER = 200         # cap: when exceeded, prune lowest-importance entries
+IMPORTANCE_BUMP = 0.05              # how much to increase importance on each re-statement
+IMPORTANCE_MAX = 1.0                # hard cap for importance_score
 
 # ── Importance scoring patterns ───────────────────────────
 # Higher = more important (identity facts > preferences > casual statements)
@@ -112,18 +115,24 @@ def _get_connection():
     return conn
 
 
+def _bump_importance(current: float) -> float:
+    """Bump importance by IMPORTANCE_BUMP, capped at IMPORTANCE_MAX."""
+    return round(min(current + IMPORTANCE_BUMP, IMPORTANCE_MAX), 2)
+
+
 def save_memory(
     content: str,
     user_id: str = "default",
     ttl_days: int = DEFAULT_TTL_DAYS,
     importance_override: float | None = None,
 ) -> int:
-    """Save a memory with its embedding vector, with dedup and importance scoring.
+    """Save a memory with its embedding vector, with two-tier dedup and importance scoring.
 
-    Before inserting, searches for an existing memory by the same user
-    whose cosine similarity >= DEDUP_SIMILARITY_THRESHOLD.  If found,
-    that existing row's content is updated (and its timestamps refreshed)
-    instead of inserting a duplicate.
+    Two-tier dedup strategy:
+    - Tier 1 (similarity >= 0.95): Near-identical — refresh existing row in place.
+    - Tier 2 (0.85 <= similarity < 0.95): Semantic duplicate — merge by keeping the
+      longer (more informative) text and bumping importance.
+    - Below 0.85: No match — insert as a fresh memory.
 
     Importance is auto-computed via content heuristics unless overridden.
 
@@ -143,10 +152,11 @@ def save_memory(
     conn = _get_connection()
     try:
         with conn.cursor() as cur:
-            # ── Dedup: look for a highly similar existing memory ──
+            # ── Find the most similar existing memory ──
             cur.execute(
                 """
-                SELECT id, content, 1 - (embedding <=> %s::vector) AS similarity
+                SELECT id, content, 1 - (embedding <=> %s::vector) AS similarity,
+                       importance_score
                 FROM memories
                 WHERE user_id = %s
                   AND (expires_at IS NULL OR expires_at > NOW())
@@ -157,25 +167,59 @@ def save_memory(
             )
             row = cur.fetchone()
 
-            if row and row[2] >= DEDUP_SIMILARITY_THRESHOLD:
-                # Near-duplicate found — refresh the existing row, bump importance
-                existing_id = row[0]
-                cur.execute(
-                    """
-                    UPDATE memories
-                    SET content = %s,
-                        embedding = %s::vector,
-                        updated_at = NOW(),
-                        expires_at = NOW() + INTERVAL '%s days',
-                        importance_score = GREATEST(importance_score, %s)
-                    WHERE id = %s
-                    RETURNING id
-                    """,
-                    (content, vec_str, ttl_days, importance, existing_id),
-                )
-                memory_id = cur.fetchone()[0]
-                conn.commit()
-                return memory_id
+            if row:
+                similarity = row[2]
+
+                # ── Tier 1: Near-identical (≥ 0.95) — refresh in place ──
+                if similarity >= DEDUP_SIMILARITY_THRESHOLD:
+                    existing_id = row[0]
+                    cur.execute(
+                        """
+                        UPDATE memories
+                        SET content = %s,
+                            embedding = %s::vector,
+                            updated_at = NOW(),
+                            expires_at = NOW() + INTERVAL '%s days',
+                            importance_score = GREATEST(importance_score, %s)
+                        WHERE id = %s
+                        RETURNING id
+                        """,
+                        (content, vec_str, ttl_days, importance, existing_id),
+                    )
+                    memory_id = cur.fetchone()[0]
+                    conn.commit()
+                    return memory_id
+
+                # ── Tier 2: Semantic duplicate (0.85–0.94) ──
+                # Merge: keep the longer (more informative) text, bump importance
+                if similarity >= MERGE_SIMILARITY_THRESHOLD:
+                    existing_id = row[0]
+                    existing_content = row[1]
+                    existing_importance = row[3] if row[3] is not None else 0.5
+
+                    # Keep the longer text — more informative
+                    merged_content = content if len(content) > len(existing_content) else existing_content
+                    merged_importance = _bump_importance(max(importance, existing_importance))
+
+                    merged_embedding = embed_text(merged_content)
+                    merged_vec_str = "[" + ",".join(str(v) for v in merged_embedding) + "]"
+
+                    cur.execute(
+                        """
+                        UPDATE memories
+                        SET content = %s,
+                            embedding = %s::vector,
+                            updated_at = NOW(),
+                            expires_at = NOW() + INTERVAL '%s days',
+                            importance_score = %s
+                        WHERE id = %s
+                        RETURNING id
+                        """,
+                        (merged_content, merged_vec_str, ttl_days, merged_importance, existing_id),
+                    )
+                    memory_id = cur.fetchone()[0]
+                    conn.commit()
+                    return memory_id
 
             # ── No duplicate — insert fresh ──
             cur.execute(
