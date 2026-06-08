@@ -34,6 +34,7 @@ from backend.memory.store import (
     start_auto_cleanup,
     stop_auto_cleanup,
 )
+from backend.middleware.safety import sanitize_input, filter_output, _MAX_MESSAGE_LENGTH, _MAX_HISTORY_LENGTH
 from backend.auth import (
     authenticate_user,
     create_user,
@@ -76,29 +77,67 @@ async def chat(
     current_user: dict = Depends(get_current_user),
 ):
     """Send a message to the agent and get a response."""
+    # ── Input sanitization ──
+    clean_message, issues = sanitize_input(request.message)
+    if any("blocked" in issue for issue in issues):
+        logger.warning(
+            "chat.input_blocked",
+            user_id=current_user["id"],
+            issues=issues,
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Message blocked: potential prompt injection detected.",
+        )
+
+    if issues:
+        logger.info(
+            "chat.input_sanitized",
+            user_id=current_user["id"],
+            issues=issues,
+        )
+
+    # ── History validation ──
+    history = request.history or []
+    if len(history) > _MAX_HISTORY_LENGTH:
+        history = history[-_MAX_HISTORY_LENGTH:]
+
+    # Trim history to prevent unbounded prompt growth across turns
+    trimmed_history = history[-MAX_HISTORY_MESSAGES:]
+
     logger.info(
         "chat.request_received",
         user_id=current_user["id"],
-        message_length=len(request.message),
-        history_length=len(request.history) if request.history else 0,
+        message_length=len(clean_message),
+        history_length=len(trimmed_history),
     )
 
-    # Trim history to prevent unbounded prompt growth across turns
-    trimmed_history = request.history[-MAX_HISTORY_MESSAGES:] if request.history else []
-    result = run_agent(request.message, user_id=current_user["id"], history=trimmed_history)
+    result = run_agent(clean_message, user_id=current_user["id"], history=trimmed_history)
 
     trace = [msg["content"] for msg in result.get("messages", [])]
+
+    # ── Output filtering ──
+    raw_answer = result.get("final_answer", "")
+    filtered_answer, was_filtered = filter_output(raw_answer)
+    if was_filtered:
+        logger.warning(
+            "chat.output_filtered",
+            user_id=current_user["id"],
+            reason="potential_system_leak",
+        )
+        trace = ["[Output filtered for safety]"]
 
     logger.info(
         "chat.response_sent",
         user_id=current_user["id"],
         iterations=result["iterations"],
         tools_used=[e["tool"] for e in result.get("used_tools", [])],
-        answer_length=len(result.get("final_answer", "")),
+        answer_length=len(filtered_answer),
+        filtered=was_filtered,
     )
 
     return ChatResponse(
-        final_answer=result.get("final_answer", ""),
+        final_answer=filtered_answer,
         trace=trace,
     )
 

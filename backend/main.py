@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.logging_config import setup_logging, get_logger
 from backend.api.routes import router
 from backend.memory.store import start_auto_cleanup, stop_auto_cleanup
+from backend.middleware.safety import SafetyMiddleware
 
 # Initialize structured logging before anything else
 setup_logging()
@@ -23,6 +24,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Safety middleware — rate limiting, input sanitization, output filtering
+app.add_middleware(SafetyMiddleware)
 
 app.include_router(router, prefix="/api")
 
