@@ -106,13 +106,41 @@ def setup_logging() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-def get_logger(name: str) -> logging.Logger:
-    """Get a named logger instance.
+class _KwargsAdapter(logging.LoggerAdapter):
+    """Adapter that forwards arbitrary kwargs into the ``extra`` dict.
+
+    The JSONFormatter reads extra fields from ``record.__dict__``; standard
+    ``logging.Logger`` does not accept arbitrary keyword arguments on
+    ``info``/``warning``/``error``.  This adapter captures them and passes
+    them as ``extra`` so the formatter can include them in the JSON output.
+    """
+
+    def process(self, msg, kwargs):
+        extra = kwargs.get("extra") or {}
+        # Any kwarg that is NOT a standard logging parameter becomes an extra field
+        standard = {"exc_info", "stack_info", "stacklevel", "extra"}
+        for key, value in list(kwargs.items()):
+            if key not in standard:
+                extra[key] = value
+                del kwargs[key]
+        if extra:
+            kwargs["extra"] = extra
+        return msg, kwargs
+
+
+def get_logger(name: str) -> logging.LoggerAdapter:
+    """Get a named logger instance that accepts structured keyword arguments.
+
+    Usage::
+
+        logger = get_logger(__name__)
+        logger.info("agent.started", user_id="abc", goal="what is python?")
 
     Args:
         name: Module name, e.g. "backend.agent.graph"
 
     Returns:
-        Configured logger that outputs JSON to console + file.
+        A LoggerAdapter that outputs JSON to console + file and forwards
+        arbitrary kwargs as structured fields.
     """
-    return logging.getLogger(name)
+    return _KwargsAdapter(logging.getLogger(name), {})

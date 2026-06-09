@@ -196,52 +196,77 @@ def get_rate_limiter() -> RateLimiter:
 
 # ── Middleware ──────────────────────────────────────────────
 
-class SafetyMiddleware(BaseHTTPMiddleware):
-    """FastAPI middleware that applies input sanitization, output filtering,
+class SafetyMiddleware:
+    """ASGI middleware that applies input sanitization, output filtering,
     and rate limiting to every request.
+
+    Implemented as pure ASGI to avoid BaseHTTPMiddleware quirks with
+    early-return responses and header mutation.
     """
 
-    async def dispatch(self, request: Request, call_next):
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
         # ── Rate limiting ──
-        # Identify the client: prefer authenticated user_id, fall back to IP
-        client_key = self._get_client_key(request)
+        client_key = self._get_client_key(scope)
         allowed, rate_info = _rate_limiter.is_allowed(client_key)
 
         if not allowed:
             logger.warning(
-                "safety.rate_limited",
-                client=client_key,
-                path=request.url.path,
+                "safety.rate_limited client=%s path=%s",
+                client_key,
+                scope.get("path", ""),
             )
-            return JSONResponse(
+            from starlette.responses import JSONResponse
+            retry_after = int(rate_info["reset_after"])
+            response = JSONResponse(
                 status_code=429,
                 content={
                     "error": "Rate limit exceeded. Try again later.",
-                    "retry_after_seconds": rate_info["reset_after"],
+                    "retry_after_seconds": retry_after,
                     "limit": rate_info["limit"],
                 },
-                headers={"Retry-After": str(rate_info["reset_after"])},
+                headers={
+                    "Retry-After": str(retry_after),
+                    "X-RateLimit-Limit": str(rate_info["limit"]),
+                    "X-RateLimit-Remaining": "0",
+                },
             )
+            await response(scope, receive, send)
+            return
 
-        # ── Process request ──
-        response = await call_next(request)
+        # ── Process request + attach rate limit headers ──
+        # We need to intercept the response to add headers
+        response_started = False
+        extra_headers = [
+            (b"x-ratelimit-limit", str(rate_info["limit"]).encode()),
+            (b"x-ratelimit-remaining", str(rate_info["remaining"]).encode()),
+        ]
 
-        # ── Attach rate limit headers to successful responses ──
-        from starlette.responses import Response
-        if isinstance(response, Response):
-            response.headers["X-RateLimit-Limit"] = str(rate_info["limit"])
-            response.headers["X-RateLimit-Remaining"] = str(rate_info["remaining"])
+        async def send_with_headers(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+                headers = list(message.get("headers", []))
+                headers.extend(extra_headers)
+                message["headers"] = headers
+            await send(message)
 
-        return response
+        await self.app(scope, receive, send_with_headers)
 
     @staticmethod
-    def _get_client_key(request: Request) -> str:
-        """Extract a rate-limit key from the request.
+    def _get_client_key(scope: dict) -> str:
+        """Extract a rate-limit key from the ASGI scope.
 
         Priority: JWT user_id → X-Forwarded-For → client host.
         """
-        # Try to get user_id from JWT in Authorization header
-        auth = request.headers.get("authorization", "")
+        headers = dict(scope.get("headers", []))
+        auth = headers.get(b"authorization", b"").decode("utf-8", errors="ignore")
         if auth.lower().startswith("bearer "):
             try:
                 from backend.auth import _decode_token
@@ -252,7 +277,11 @@ class SafetyMiddleware(BaseHTTPMiddleware):
                 pass
 
         # Fall back to IP
-        forwarded = request.headers.get("x-forwarded-for")
+        forwarded = headers.get(b"x-forwarded-for", b"").decode("utf-8", errors="ignore")
         if forwarded:
             return f"ip:{forwarded.split(',')[0].strip()}"
-        return f"ip:{request.client.host if request.client else 'unknown'}"
+
+        client = scope.get("client")
+        if client:
+            return f"ip:{client[0]}"
+        return "ip:unknown"

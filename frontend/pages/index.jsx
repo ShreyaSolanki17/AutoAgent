@@ -21,6 +21,8 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [trace, setTrace] = useState([]);
   const [backendStatus, setBackendStatus] = useState("connecting");
+  const [feedbackState, setFeedbackState] = useState({}); // message_index -> 1 | -1
+  const [lastScores, setLastScores] = useState(null);     // judge scores from latest response
   const messagesEndRef = useRef(null);
 
   // Redirect to /login if unauthenticated
@@ -76,9 +78,16 @@ export default function Home() {
 
       const data = res.data;
       setTrace(data.trace || []);
+      setLastScores(data.evaluation?.scores || null);
+      setFeedbackState((prev) => ({ ...prev, [messages.length]: undefined })); // ready for feedback
       setMessages((prev) => [
         ...prev,
-        { role: "agent", content: data.final_answer },
+        {
+          role: "agent",
+          content: data.final_answer,
+          messageId: data.message_id || "",
+          evaluation: data.evaluation || null,
+        },
       ]);
     } catch {
       setMessages((prev) => [
@@ -97,6 +106,23 @@ export default function Home() {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
+    }
+  }
+
+  async function submitFeedback(messageIndex, feedback) {
+    const msg = messages[messageIndex];
+    if (!msg?.messageId) return;
+
+    try {
+      const token = session?.user?.accessToken;
+      await axios.post(
+        `${API_URL}/api/evaluations/feedback`,
+        { message_id: msg.messageId, feedback },
+        token ? { headers: { Authorization: `Bearer ${token}` } } : {},
+      );
+      setFeedbackState((prev) => ({ ...prev, [messageIndex]: feedback }));
+    } catch (err) {
+      console.error("Feedback submission failed:", err);
     }
   }
 
@@ -188,6 +214,37 @@ export default function Home() {
                   }`}
                 >
                   <p className="whitespace-pre-wrap">{msg.content}</p>
+
+                  {/* Feedback buttons on agent messages */}
+                  {msg.role === "agent" && msg.messageId && (
+                    <div className="flex items-center gap-2 mt-2 pt-2 border-t border-gray-600">
+                      <button
+                        onClick={() => submitFeedback(i, 1)}
+                        className={`text-sm px-2 py-1 rounded transition-colors ${
+                          feedbackState[i] === 1
+                            ? "bg-green-600 text-white"
+                            : "text-gray-400 hover:text-green-400 hover:bg-gray-700"
+                        }`}
+                        title="Thumbs up"
+                      >
+                        👍
+                      </button>
+                      <button
+                        onClick={() => submitFeedback(i, -1)}
+                        className={`text-sm px-2 py-1 rounded transition-colors ${
+                          feedbackState[i] === -1
+                            ? "bg-red-600 text-white"
+                            : "text-gray-400 hover:text-red-400 hover:bg-gray-700"
+                        }`}
+                        title="Thumbs down"
+                      >
+                        👎
+                      </button>
+                      {feedbackState[i] !== undefined && (
+                        <span className="text-xs text-gray-500">Thanks!</span>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -237,7 +294,7 @@ export default function Home() {
             </h2>
           </div>
           <div className="p-4 space-y-3">
-            {trace.length === 0 && (
+            {trace.length === 0 && !lastScores && (
               <p className="text-gray-500 text-sm">
                 Send a message to see the agent&apos;s reasoning steps here.
               </p>
@@ -259,6 +316,53 @@ export default function Home() {
               </div>
             ))}
           </div>
+
+          {/* Quality Scores panel (shown when judge scores are available) */}
+          {lastScores && lastScores.overall != null && (
+            <div className="p-4 border-t border-gray-700">
+              <h3 className="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">
+                Quality Scores
+              </h3>
+              <div className="space-y-2">
+                {[
+                  { label: "Relevance", key: "relevance", barColor: "bg-blue-500" },
+                  { label: "Accuracy", key: "accuracy", barColor: "bg-green-500" },
+                  { label: "Helpfulness", key: "helpfulness", barColor: "bg-yellow-500" },
+                  { label: "Safety", key: "safety", barColor: "bg-purple-500" },
+                ].map(({ label, key, barColor }) => {
+                  const score = lastScores[key] ?? 0;
+                  return (
+                    <div key={key} className="flex items-center gap-2">
+                      <span className="text-xs text-gray-400 w-20">{label}</span>
+                      <div className="flex-1 bg-gray-700 rounded-full h-2">
+                        <div
+                          className={`${barColor} h-2 rounded-full transition-all`}
+                          style={{ width: `${Math.round(score * 100)}%` }}
+                        />
+                      </div>
+                      <span className="text-xs text-gray-300 w-10 text-right">
+                        {Math.round(score * 100)}%
+                      </span>
+                    </div>
+                  );
+                })}
+                <div className="pt-2 border-t border-gray-600 mt-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-gray-300 font-semibold w-20">Overall</span>
+                    <div className="flex-1 bg-gray-700 rounded-full h-2.5">
+                      <div
+                        className="bg-white h-2.5 rounded-full transition-all"
+                        style={{ width: `${Math.round((lastScores.overall ?? 0) * 100)}%` }}
+                      />
+                    </div>
+                    <span className="text-xs text-white font-semibold w-10 text-right">
+                      {Math.round((lastScores.overall ?? 0) * 100)}%
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
         </aside>
       </div>
     </div>

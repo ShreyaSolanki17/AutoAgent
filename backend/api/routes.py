@@ -36,6 +36,13 @@ from backend.memory.store import (
 )
 from backend.middleware.safety import sanitize_input, filter_output, _MAX_MESSAGE_LENGTH, _MAX_HISTORY_LENGTH
 from backend.middleware.usage import record_request, get_usage_stats, get_cost
+from backend.evaluation.judge import evaluate_response, compute_trace_hash
+from backend.evaluation.store import save_evaluation, get_evaluation_stats, get_recent_evaluations
+from backend.models.schemas import (
+    SubmitFeedbackRequest,
+    EvaluationScores,
+    EvaluationResponse,
+)
 from backend.auth import (
     authenticate_user,
     create_user,
@@ -128,6 +135,38 @@ async def chat(
         )
         trace = ["[Output filtered for safety]"]
 
+    # ── Generate message_id for correlation ──
+    import hashlib as _hashlib
+    import time as _time
+    message_id = _hashlib.sha256(
+        f"{current_user['id']}:{clean_message}:{_time.time_ns()}".encode()
+    ).hexdigest()[:16]
+
+    # ── LLM-as-judge evaluation (non-blocking — never breaks chat) ──
+    judge_scores = None
+    try:
+        judge_scores = evaluate_response(
+            user_goal=clean_message,
+            final_answer=filtered_answer,
+            trace=trace,
+        )
+    except Exception as e:
+        logger.warning("chat.judge_failed", error=str(e))
+
+    # ── Persist evaluation to DB (non-blocking — never breaks chat) ──
+    trace_hash = compute_trace_hash(trace) if trace else None
+    try:
+        save_evaluation(
+            user_id=current_user["id"],
+            message_id=message_id,
+            user_goal=clean_message,
+            final_answer=filtered_answer,
+            trace_hash=trace_hash,
+            judge_scores=judge_scores,
+        )
+    except Exception as e:
+        logger.warning("chat.eval_save_failed", error=str(e))
+
     # ── Record usage analytics ──
     usage = result.get("usage", {})
     record_request(
@@ -155,9 +194,27 @@ async def chat(
         response_time_ms=usage.get("response_time_ms", 0),
     )
 
+    # ── Build inline evaluation for response (if judge ran) ──
+    inline_eval = None
+    if judge_scores and judge_scores.get("overall") is not None:
+        inline_eval = EvaluationResponse(
+            message_id=message_id,
+            scores=EvaluationScores(
+                relevance=judge_scores.get("relevance"),
+                accuracy=judge_scores.get("accuracy"),
+                helpfulness=judge_scores.get("helpfulness"),
+                safety=judge_scores.get("safety"),
+                overall=judge_scores.get("overall"),
+            ),
+            judge_reasoning=judge_scores.get("reasoning"),
+            evaluation_type="auto",
+        )
+
     return ChatResponse(
         final_answer=filtered_answer,
         trace=trace,
+        message_id=message_id,
+        evaluation=inline_eval,
     )
 
 
@@ -328,6 +385,64 @@ async def cost_estimate(
         "output_tokens": output_tokens,
         "estimated_cost_usd": cost,
     }
+
+
+# ── Evaluation / Feedback ─────────────────────────────
+
+@router.post("/evaluations/feedback")
+async def submit_feedback(
+    request: SubmitFeedbackRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Submit thumbs up/down feedback for a specific response.
+
+    The message_id is the correlation ID returned in the ChatResponse.
+    Upserts into the evaluations table — safe to call multiple times.
+    """
+    if request.feedback not in (-1, 1):
+        raise HTTPException(status_code=400, detail="feedback must be 1 (up) or -1 (down)")
+
+    eval_id = save_evaluation(
+        user_id=current_user["id"],
+        message_id=request.message_id,
+        user_goal="",  # filled from existing record on upsert
+        final_answer="",
+        user_feedback=request.feedback,
+        user_comment=request.comment,
+    )
+
+    logger.info(
+        "eval.feedback_submitted",
+        user_id=current_user["id"],
+        message_id=request.message_id,
+        feedback=request.feedback,
+        evaluation_id=eval_id,
+    )
+
+    return {"status": "recorded", "evaluation_id": eval_id}
+
+
+@router.get("/evaluations/stats")
+async def evaluation_stats(
+    current_user: dict = Depends(get_current_user),
+    days: int = 7,
+):
+    """Get evaluation statistics for the current user.
+
+    Returns totals, per-dimension averages, daily breakdown, and score distribution.
+    """
+    stats = get_evaluation_stats(user_id=current_user["id"], days=days)
+    return stats
+
+
+@router.get("/evaluations/recent")
+async def recent_evaluations(
+    current_user: dict = Depends(get_current_user),
+    limit: int = 20,
+):
+    """Get recent evaluations for the current user (for feedback loop analysis)."""
+    evals = get_recent_evaluations(user_id=current_user["id"], limit=limit)
+    return {"evaluations": evals, "total": len(evals)}
 
 
 # ── Auth ───────────────────────────────────────────────
