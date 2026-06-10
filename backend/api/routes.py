@@ -1,7 +1,9 @@
 """FastAPI route handlers — chat, memories, auth, health.
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+import os
+
+from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from backend.logging_config import get_logger
@@ -42,6 +44,19 @@ from backend.models.schemas import (
     SubmitFeedbackRequest,
     EvaluationScores,
     EvaluationResponse,
+    PromptVersionCreate,
+    PromptVersionResponse,
+    PromptPromoteRequest,
+    PromptListResponse,
+)
+from backend.prompts.store import (
+    get_active_prompt,
+    create_prompt_version,
+    promote_prompt,
+    rollback_prompt,
+    list_versions,
+    delete_version,
+    get_version,
 )
 from backend.auth import (
     authenticate_user,
@@ -484,6 +499,152 @@ async def me(token: str):
         raise HTTPException(status_code=404, detail="User not found")
 
     return UserResponse(**user)
+
+
+# ── Admin: Prompt Management ───────────────────────────
+
+async def verify_admin(x_admin_key: str | None = Header(None, alias="X-Admin-Key")):
+    """Dependency that validates the admin API key from the X-Admin-Key header."""
+    admin_key = os.getenv("ADMIN_API_KEY", "")
+    if not admin_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Admin API key not configured on server.",
+        )
+    if x_admin_key != admin_key:
+        raise HTTPException(status_code=403, detail="Invalid admin key.")
+
+
+@router.post("/admin/prompts", dependencies=[Depends(verify_admin)])
+async def admin_create_prompt(request: PromptVersionCreate):
+    """Create a new prompt version (starts as 'draft').
+
+    Requires X-Admin-Key header.
+    """
+    try:
+        version = create_prompt_version(
+            prompt_key=request.prompt_key,
+            content=request.content,
+            change_summary=request.change_summary,
+            created_by="admin",
+        )
+        logger.info(
+            "admin.prompt_created",
+            prompt_key=request.prompt_key,
+            version=version,
+        )
+        return {"status": "created", "prompt_key": request.prompt_key, "version": version, "status": "draft"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create prompt version: {e}")
+
+
+@router.get("/admin/prompts/{prompt_key}/versions", dependencies=[Depends(verify_admin)])
+async def admin_list_versions(prompt_key: str, limit: int = 50):
+    """List version history for a prompt key, newest first.
+
+    Requires X-Admin-Key header.
+    """
+    versions = list_versions(prompt_key, limit=limit)
+    return {"prompt_key": prompt_key, "versions": versions, "total": len(versions)}
+
+
+@router.get("/admin/prompts/{prompt_key}/active", dependencies=[Depends(verify_admin)])
+async def admin_get_active_prompt(prompt_key: str, env: str = "production"):
+    """Get the active prompt for a specific environment (default: production).
+
+    Requires X-Admin-Key header.
+    """
+    content = get_active_prompt(prompt_key, environment=env)
+    if content is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active prompt found for '{prompt_key}' in env '{env}'.",
+        )
+    return {"prompt_key": prompt_key, "environment": env, "content": content}
+
+
+@router.post("/admin/prompts/{prompt_key}/{version}/promote", dependencies=[Depends(verify_admin)])
+async def admin_promote_prompt(
+    prompt_key: str,
+    version: int,
+    request: PromptPromoteRequest,
+):
+    """Promote a prompt version: draft → staging, or staging → production.
+
+    Requires X-Admin-Key header. Body must include target_status.
+    """
+    if request.target_status not in ("staging", "production"):
+        raise HTTPException(
+            status_code=400,
+            detail="target_status must be 'staging' or 'production'.",
+        )
+
+    # Verify the version exists
+    existing = get_version(prompt_key, version)
+    if not existing:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version {version} of '{prompt_key}' not found.",
+        )
+
+    success = promote_prompt(prompt_key, version, request.target_status)
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot promote {prompt_key} v{version} from '{existing['status']}' to '{request.target_status}'.",
+        )
+
+    logger.info(
+        "admin.prompt_promoted",
+        prompt_key=prompt_key,
+        version=version,
+        from_status=existing["status"],
+        to_status=request.target_status,
+    )
+
+    return {
+        "status": "promoted",
+        "prompt_key": prompt_key,
+        "version": version,
+        "new_status": request.target_status,
+    }
+
+
+@router.post("/admin/prompts/{prompt_key}/rollback", dependencies=[Depends(verify_admin)])
+async def admin_rollback_prompt(prompt_key: str):
+    """Rollback to the previous production version of a prompt.
+
+    Archives the current production version and re-activates the most recent
+    archived version. Requires X-Admin-Key header.
+    """
+    success = rollback_prompt(prompt_key)
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Rollback failed for '{prompt_key}'. No previous version available.",
+        )
+
+    logger.info("admin.prompt_rollback", prompt_key=prompt_key)
+
+    return {"status": "rolled_back", "prompt_key": prompt_key}
+
+
+@router.delete("/admin/prompts/{prompt_key}/{version}", dependencies=[Depends(verify_admin)])
+async def admin_delete_version(prompt_key: str, version: int):
+    """Delete a prompt version. Only draft versions can be deleted.
+
+    Requires X-Admin-Key header.
+    """
+    success = delete_version(prompt_key, version)
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete {prompt_key} v{version}. It may not exist or may not be a draft.",
+        )
+
+    logger.info("admin.prompt_deleted", prompt_key=prompt_key, version=version)
+
+    return {"status": "deleted", "prompt_key": prompt_key, "version": version}
 
 
 # ── Health ─────────────────────────────────────────────

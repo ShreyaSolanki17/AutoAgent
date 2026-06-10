@@ -17,37 +17,17 @@ from dotenv import load_dotenv
 from groq import Groq
 
 from backend.logging_config import get_logger
+from backend.config import PROVIDERS, TEMPERATURE, MAX_TOKENS
 
 logger = get_logger(__name__)
 
 # Load .env from project root (two levels up from this file: backend/llm.py -> root)
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-# ── Provider configuration ────────────────────────────────
-_PROVIDERS: list[dict] = [
-    {
-        "name": "groq",
-        "model": "llama-3.3-70b-versatile",
-        "api_key_env": "GROQ_API_KEY",
-        "base_url": None,          # uses native Groq SDK
-    },
-    {
-        "name": "google",
-        "model": "gemini-2.0-flash",
-        "api_key_env": "GOOGLE_API_KEY",
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-    },
-    {
-        "name": "openrouter",
-        "model": "openai/gpt-oss-20b:free",
-        "api_key_env": "OPENROUTER_API_KEY",
-        "base_url": "https://openrouter.ai/api/v1",
-    },
-]
-
-# Shared generation settings
-_TEMPERATURE = 0.1
-_MAX_TOKENS = 4096
+# Aliases for internal use (keeps the rest of this file unchanged)
+_PROVIDERS = PROVIDERS
+_TEMPERATURE = TEMPERATURE
+_MAX_TOKENS = MAX_TOKENS
 
 
 def _call_groq(messages: list[dict[str, str]], api_key: str) -> str:

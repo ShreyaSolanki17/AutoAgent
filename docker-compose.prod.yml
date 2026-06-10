@@ -1,0 +1,57 @@
+# Production Docker Compose — deploy with:
+#   docker compose -f docker-compose.prod.yml up -d
+#
+# Requires .env file in project root with:
+#   POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+#   GROQ_API_KEY (or other LLM provider keys)
+#   ADMIN_API_KEY
+#   NEXTAUTH_SECRET
+#   APP_ENV=production
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: autoagent-db
+    env_file: .env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/:/docker-entrypoint-initdb.d/:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - backend
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${DOCKER_IMAGE:-autoagent-backend:latest}
+    container_name: autoagent-backend
+    env_file: .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      APP_ENV: production
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - backend
+
+volumes:
+  pgdata:
+
+networks:
+  backend:

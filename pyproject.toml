@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "autoagent"
+version = "0.1.0"
+description = "Autonomous AI agent with persistent memory"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "db: tests that require PostgreSQL",
+    "unit: pure unit tests (no external dependencies)",
+    "slow: tests that use real embeddings model",
+]
+addopts = "-v --tb=short -ra"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]

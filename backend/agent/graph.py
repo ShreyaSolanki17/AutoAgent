@@ -14,42 +14,20 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
 from backend.agent.state import AgentState
-from backend.agent.prompts import PLANNER_SYSTEM, OBSERVER_SYSTEM
+from backend.agent.prompts import get_prompt
 from backend.tools.registry import execute_tool
 from backend.memory.store import search_memories, save_memory
 from backend.logging_config import get_logger
+from backend.config import (
+    PROVIDERS,
+    MAX_ITERATIONS,
+    MAX_OBSERVATION_CHARS,
+    AUTO_SAVE_TRIGGERS,
+)
 
 logger = get_logger(__name__)
 
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
-
-MAX_ITERATIONS = 3
-MAX_OBSERVATION_CHARS = 300  # Truncate tool outputs stored in trace to save tokens
-
-# ── LLM Provider Config (free-tier only) ──────────────────
-# All providers are tried in order; first one with a valid key wins.
-# If a provider fails at runtime, the LLM call will raise and the
-# caller (LangGraph node) will surface the error.
-_PROVIDERS = [
-    {
-        "name": "groq",
-        "model": "llama-3.3-70b-versatile",
-        "api_key_env": "GROQ_API_KEY",
-        "base_url": None,  # native Groq SDK via langchain-groq
-    },
-    {
-        "name": "google",
-        "model": "gemini-2.0-flash",
-        "api_key_env": "GOOGLE_API_KEY",
-        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-    },
-    {
-        "name": "openrouter",
-        "model": "openai/gpt-oss-20b:free",
-        "api_key_env": "OPENROUTER_API_KEY",
-        "base_url": "https://openrouter.ai/api/v1",
-    },
-]
 
 
 def _get_llm() -> ChatGroq | ChatOpenAI:
@@ -67,7 +45,9 @@ def _get_llm() -> ChatGroq | ChatOpenAI:
     # Reload .env so key changes are picked up without server restart
     load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env", override=True)
 
-    for provider in _PROVIDERS:
+    from backend.config import TEMPERATURE, MAX_TOKENS
+
+    for provider in PROVIDERS:
         api_key = os.getenv(provider["api_key_env"])
         if not api_key:
             continue
@@ -76,15 +56,15 @@ def _get_llm() -> ChatGroq | ChatOpenAI:
             # Groq — native langchain-groq
             return ChatGroq(
                 model=provider["model"],
-                temperature=0.1,
-                max_tokens=4096,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS,
             )
         else:
             # Google / OpenRouter — OpenAI-compatible via langchain-openai
             return ChatOpenAI(
                 model=provider["model"],
-                temperature=0.1,
-                max_tokens=4096,
+                temperature=TEMPERATURE,
+                max_tokens=MAX_TOKENS,
                 api_key=api_key,
                 base_url=provider["base_url"],
             )
@@ -92,7 +72,7 @@ def _get_llm() -> ChatGroq | ChatOpenAI:
     raise RuntimeError(
         "All LLM providers failed. No API key found.\n"
         "Set at least one of these in .env: "
-        + ", ".join(p["api_key_env"] for p in _PROVIDERS)
+        + ", ".join(p["api_key_env"] for p in PROVIDERS)
     )
 
 
@@ -163,7 +143,7 @@ def plan_node(state: AgentState) -> AgentState:
         user_msg += "Pick a DIFFERENT tool or use 'finish'.\n"
 
     response = llm.invoke([
-        {"role": "system", "content": PLANNER_SYSTEM},
+        {"role": "system", "content": get_prompt("PLANNER_SYSTEM")},
         {"role": "user", "content": user_msg},
     ])
 
@@ -325,7 +305,7 @@ def observe_node(state: AgentState) -> AgentState:
             )
 
         response = llm.invoke([
-            {"role": "system", "content": OBSERVER_SYSTEM},
+            {"role": "system", "content": get_prompt("OBSERVER_SYSTEM")},
             {"role": "user", "content": user_msg},
         ])
         content = response.content.strip()
@@ -360,13 +340,8 @@ def _auto_save_memory(user_goal: str, observation: str, user_id: str = "default"
     Triggers on patterns like "I like...", "My name is...", "Remember that..."
     """
     goal_lower = user_goal.lower().strip()
-    triggers = [
-        "my name is", "i like", "i love", "i prefer",
-        "i work", "i live", "i have", "remember that",
-        "my favorite", "i am", "i'm",
-    ]
 
-    should_save = any(t in goal_lower for t in triggers)
+    should_save = any(t in goal_lower for t in AUTO_SAVE_TRIGGERS)
 
     if should_save:
         try:
@@ -486,7 +461,7 @@ def run_agent(user_goal: str, user_id: str = "default", history: list[dict] | No
     elapsed_ms = round((time.time() - start_time) * 1000)
 
     # Detect which provider/model was used
-    for provider_cfg in _PROVIDERS:
+    for provider_cfg in PROVIDERS:
         if os.getenv(provider_cfg["api_key_env"]):
             provider_used = provider_cfg["name"]
             model_used = provider_cfg["model"]

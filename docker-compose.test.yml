@@ -1,0 +1,27 @@
+# Docker Compose for local CI-like testing
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   python -m pytest backend/tests/ -v
+#   docker compose -f docker-compose.test.yml down -v
+
+services:
+  postgres-test:
+    image: pgvector/pgvector:pg17
+    container_name: autoagent-test-db
+    environment:
+      POSTGRES_USER: autoagent
+      POSTGRES_PASSWORD: autoagent_test_pass
+      POSTGRES_DB: autoagent_db
+    ports:
+      - "5433:5432"  # Different port to avoid conflict with dev DB on 5432
+    volumes:
+      - pgdata_test:/var/lib/postgresql/data
+      - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U autoagent"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata_test:

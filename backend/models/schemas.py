@@ -106,3 +106,32 @@ class UserResponse(BaseModel):
     id: str
     email: str
     name: str
+
+
+# ── Prompt Versioning ────────────────────────────────────
+
+class PromptVersionCreate(BaseModel):
+    prompt_key: str
+    content: str
+    change_summary: str = ""
+
+
+class PromptVersionResponse(BaseModel):
+    id: int
+    prompt_key: str
+    version: int
+    content: str
+    status: str
+    change_summary: str | None
+    created_by: str
+    created_at: str = ""
+    promoted_at: str | None = None
+
+
+class PromptPromoteRequest(BaseModel):
+    target_status: str  # "staging" or "production"
+
+
+class PromptListResponse(BaseModel):
+    prompts: list[PromptVersionResponse]
+    total: int
