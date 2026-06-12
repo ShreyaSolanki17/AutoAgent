@@ -16,6 +16,7 @@ class ChatResponse(BaseModel):
     trace: list[str]
     message_id: str = ""           # Correlation ID for feedback submission
     evaluation: "EvaluationResponse | None" = None  # Inline judge result (if available)
+    ab_variant: str | None = None  # 'A' or 'B' if an A/B test is active
 
 
 # ── Evaluation / Feedback ────────────────────────────
@@ -134,4 +135,32 @@ class PromptPromoteRequest(BaseModel):
 
 class PromptListResponse(BaseModel):
     prompts: list[PromptVersionResponse]
+    total: int
+
+
+# ── A/B Testing ─────────────────────────────────────────
+
+class ABCreateRequest(BaseModel):
+    test_name: str
+    prompt_key: str
+    variant_a_version: int
+    variant_b_version: int
+    description: str = ""
+
+
+class ABTestResponse(BaseModel):
+    id: int
+    test_name: str
+    prompt_key: str
+    variant_a_version: int
+    variant_b_version: int
+    status: str
+    description: str | None = None
+    created_by: str = ""
+    created_at: str = ""
+    ended_at: str | None = None
+
+
+class ABTestListResponse(BaseModel):
+    tests: list[ABTestResponse]
     total: int

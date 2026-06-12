@@ -48,6 +48,9 @@ from backend.models.schemas import (
     PromptVersionResponse,
     PromptPromoteRequest,
     PromptListResponse,
+    ABCreateRequest,
+    ABTestResponse,
+    ABTestListResponse,
 )
 from backend.prompts.store import (
     get_active_prompt,
@@ -58,6 +61,12 @@ from backend.prompts.store import (
     delete_version,
     get_version,
 )
+from backend.prompts.ab_testing import (
+    create_ab_test,
+    stop_ab_test,
+    list_ab_tests,
+)
+from backend.evaluation.store import get_ab_comparison_stats
 from backend.auth import (
     authenticate_user,
     create_user,
@@ -170,6 +179,7 @@ async def chat(
 
     # ── Persist evaluation to DB (non-blocking — never breaks chat) ──
     trace_hash = compute_trace_hash(trace) if trace else None
+    ab_variant = result.get("ab_variant")
     try:
         save_evaluation(
             user_id=current_user["id"],
@@ -178,6 +188,7 @@ async def chat(
             final_answer=filtered_answer,
             trace_hash=trace_hash,
             judge_scores=judge_scores,
+            ab_variant=ab_variant,
         )
     except Exception as e:
         logger.warning("chat.eval_save_failed", error=str(e))
@@ -194,6 +205,7 @@ async def chat(
         cost_usd=usage.get("cost_usd", 0.0),
         response_time_ms=usage.get("response_time_ms", 0),
         status_code=200,
+        ab_variant=ab_variant,
     )
 
     logger.info(
@@ -230,6 +242,7 @@ async def chat(
         trace=trace,
         message_id=message_id,
         evaluation=inline_eval,
+        ab_variant=ab_variant,
     )
 
 
@@ -645,6 +658,117 @@ async def admin_delete_version(prompt_key: str, version: int):
     logger.info("admin.prompt_deleted", prompt_key=prompt_key, version=version)
 
     return {"status": "deleted", "prompt_key": prompt_key, "version": version}
+
+
+# ── Admin: A/B Testing ─────────────────────────────────
+
+@router.get("/admin/ab-tests", dependencies=[Depends(verify_admin)])
+async def admin_list_ab_tests(prompt_key: str | None = None):
+    """List all A/B tests, optionally filtered by prompt_key.
+
+    Requires X-Admin-Key header.
+    """
+    tests = list_ab_tests(prompt_key=prompt_key)
+    return ABTestListResponse(
+        tests=[
+            ABTestResponse(
+                id=t["id"],
+                test_name=t["test_name"],
+                prompt_key=t["prompt_key"],
+                variant_a_version=t["variant_a_version"],
+                variant_b_version=t["variant_b_version"],
+                status=t["status"],
+                description=t.get("description"),
+                created_by=t.get("created_by", ""),
+                created_at=str(t.get("created_at", "")),
+                ended_at=str(t["ended_at"]) if t.get("ended_at") else None,
+            )
+            for t in tests
+        ],
+        total=len(tests),
+    )
+
+
+@router.post("/admin/ab-tests", dependencies=[Depends(verify_admin)])
+async def admin_create_ab_test(request: ABCreateRequest):
+    """Create a new A/B test between two prompt versions.
+
+    Requires X-Admin-Key header. Both versions must already exist in the
+    prompt_versions table (e.g., created via the seed script or POST /admin/prompts).
+    """
+    # Verify both versions exist
+    va = get_version(request.prompt_key, request.variant_a_version)
+    if not va:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version {request.variant_a_version} of '{request.prompt_key}' not found.",
+        )
+    vb = get_version(request.prompt_key, request.variant_b_version)
+    if not vb:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Version {request.variant_b_version} of '{request.prompt_key}' not found.",
+        )
+
+    success = create_ab_test(
+        test_name=request.test_name,
+        prompt_key=request.prompt_key,
+        variant_a_version=request.variant_a_version,
+        variant_b_version=request.variant_b_version,
+        description=request.description,
+        created_by="admin",
+    )
+    if not success:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A/B test '{request.test_name}' already exists or could not be created.",
+        )
+
+    logger.info(
+        "admin.ab_test_created",
+        test_name=request.test_name,
+        prompt_key=request.prompt_key,
+        variant_a=request.variant_a_version,
+        variant_b=request.variant_b_version,
+    )
+    return {
+        "status": "created",
+        "test_name": request.test_name,
+        "prompt_key": request.prompt_key,
+        "variant_a_version": request.variant_a_version,
+        "variant_b_version": request.variant_b_version,
+    }
+
+
+@router.get("/admin/ab-tests/{test_name}/compare", dependencies=[Depends(verify_admin)])
+async def admin_compare_ab_test(test_name: str, days: int = 30):
+    """Compare A vs B performance for a given test.
+
+    Returns judge scores, user feedback, and usage metrics per variant,
+    plus the difference (B - A). Requires X-Admin-Key header.
+    """
+    stats = get_ab_comparison_stats(test_name=test_name, days=days)
+    if "error" in stats:
+        raise HTTPException(status_code=500, detail=stats["error"])
+    return stats
+
+
+@router.post("/admin/ab-tests/{test_name}/stop", dependencies=[Depends(verify_admin)])
+async def admin_stop_ab_test(test_name: str):
+    """Stop an A/B test (status → 'completed').
+
+    Requires X-Admin-Key header. Optionally include ?promote_winner=true
+    to auto-promote the winning variant to production.
+    """
+    success = stop_ab_test(test_name)
+    if not success:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active A/B test found with name '{test_name}'.",
+        )
+
+    logger.info("admin.ab_test_stopped", test_name=test_name)
+    return {"status": "stopped", "test_name": test_name}
 
 
 # ── Health ─────────────────────────────────────────────

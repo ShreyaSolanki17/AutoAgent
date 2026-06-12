@@ -14,7 +14,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
 from backend.agent.state import AgentState
-from backend.agent.prompts import get_prompt
+from backend.agent.prompts import get_prompt, get_prompt_with_ab
 from backend.tools.registry import execute_tool
 from backend.memory.store import search_memories, save_memory
 from backend.logging_config import get_logger
@@ -142,8 +142,10 @@ def plan_node(state: AgentState) -> AgentState:
             user_msg += f"  - {tool}: {snippet}…\n"
         user_msg += "Pick a DIFFERENT tool or use 'finish'.\n"
 
+    planner_prompt, ab_variant = get_prompt_with_ab("PLANNER_SYSTEM", state["user_id"])
+
     response = llm.invoke([
-        {"role": "system", "content": get_prompt("PLANNER_SYSTEM")},
+        {"role": "system", "content": planner_prompt},
         {"role": "user", "content": user_msg},
     ])
 
@@ -180,6 +182,7 @@ def plan_node(state: AgentState) -> AgentState:
         "plan": reason,
         "tool_name": tool_name,
         "tool_input": tool_input,
+        "ab_variant": ab_variant if ab_variant else state.get("ab_variant"),
         "messages": state["messages"] + [
             {"role": "assistant", "content": f"[Plan] {tool_name}: {reason}"}
         ],
@@ -417,6 +420,7 @@ def run_agent(user_goal: str, user_id: str = "default", history: list[dict] | No
         "iterations": 0,
         "used_tools": [],
         "usage": {"input_tokens": 0, "output_tokens": 0, "provider": "", "model": "", "cost_usd": 0.0},
+        "ab_variant": None,
     }
     result = agent.invoke(initial_state)
 

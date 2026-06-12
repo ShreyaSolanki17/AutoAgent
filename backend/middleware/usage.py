@@ -82,6 +82,7 @@ def record_request(
     cost_usd: float,
     response_time_ms: int,
     status_code: int,
+    ab_variant: str | None = None,
 ):
     """Record a request in the daily stats cache and persist to DB."""
     today = time.strftime("%Y-%m-%d")
@@ -104,14 +105,16 @@ def record_request(
                     """
                     INSERT INTO usage_logs
                         (user_id, endpoint, provider, model, input_tokens,
-                         output_tokens, total_tokens, cost_usd, response_time_ms, status_code)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         output_tokens, total_tokens, cost_usd, response_time_ms,
+                         status_code, ab_variant)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         user_id, endpoint, provider or "", model or "",
                         input_tokens, output_tokens,
                         input_tokens + output_tokens,
                         cost_usd, response_time_ms, status_code,
+                        ab_variant,
                     ),
                 )
             conn.commit()

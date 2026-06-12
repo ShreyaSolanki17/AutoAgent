@@ -88,6 +88,40 @@ def get_prompt(prompt_key: str) -> str:
     return _DEFAULTS.get(prompt_key, "")
 
 
+def get_prompt_with_ab(prompt_key: str, user_id: str) -> tuple[str | None, str | None]:
+    """Load a prompt by key with A/B test awareness.
+
+    If an active A/B test exists for the prompt_key, the user is deterministically
+    assigned to variant A or B. Otherwise falls back to standard resolution.
+
+    Uses a per-user cache key when A/B is active to prevent one user's variant
+    from leaking to another user.
+
+    Args:
+        prompt_key: e.g. 'PLANNER_SYSTEM', 'OBSERVER_SYSTEM'
+        user_id: Unique user identifier for variant assignment.
+
+    Returns:
+        Tuple of (prompt_content, ab_variant).
+        ab_variant is 'A', 'B', or None.
+        prompt_content is None if the key is completely unknown.
+    """
+    try:
+        from backend.prompts.ab_testing import get_prompt_for_ab_test
+        content, variant = get_prompt_for_ab_test(prompt_key, user_id)
+        if content:
+            # Use per-user cache key when A/B is active to prevent variant leaking
+            cache_key = f"{prompt_key}:ab:{user_id}" if variant else prompt_key
+            _prompt_cache[cache_key] = {"content": content, "ts": time.time()}
+            return content, variant
+    except Exception:
+        pass
+
+    # Fallback to standard resolution (no A/B)
+    content = get_prompt(prompt_key)
+    return content, None
+
+
 def refresh_cache():
     """Clear the prompt cache to force reload from DB on next call."""
     _prompt_cache.clear()

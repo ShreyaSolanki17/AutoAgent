@@ -1,7 +1,7 @@
 """DuckDuckGo search tool — free, no API key required.
 """
 
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 
 
 def search(query: str, max_results: int = 5) -> str:

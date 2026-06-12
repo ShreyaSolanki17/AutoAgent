@@ -23,6 +23,7 @@ def save_evaluation(
     judge_scores: dict | None = None,
     user_feedback: int | None = None,
     user_comment: str | None = None,
+    ab_variant: str | None = None,
 ) -> int | None:
     """Save or upsert an evaluation record.
 
@@ -62,13 +63,13 @@ def save_evaluation(
                         user_feedback, user_comment,
                         judge_relevance, judge_accuracy, judge_helpfulness,
                         judge_safety, judge_overall, judge_reasoning, judge_model,
-                        evaluation_type
+                        evaluation_type, ab_variant
                     ) VALUES (
                         %s, %s, %s, %s, %s,
                         %s, %s,
                         %s, %s, %s,
                         %s, %s, %s, %s,
-                        %s
+                        %s, %s
                     )
                     ON CONFLICT (message_id) DO UPDATE SET
                         user_feedback = COALESCE(EXCLUDED.user_feedback, evaluations.user_feedback),
@@ -80,6 +81,7 @@ def save_evaluation(
                         judge_overall = COALESCE(EXCLUDED.judge_overall, evaluations.judge_overall),
                         judge_reasoning = COALESCE(EXCLUDED.judge_reasoning, evaluations.judge_reasoning),
                         judge_model = COALESCE(EXCLUDED.judge_model, evaluations.judge_model),
+                        ab_variant = COALESCE(EXCLUDED.ab_variant, evaluations.ab_variant),
                         evaluation_type = CASE
                             WHEN evaluations.user_feedback IS NOT NULL
                                  AND EXCLUDED.judge_overall IS NOT NULL THEN 'both'
@@ -105,6 +107,7 @@ def save_evaluation(
                         judge_scores.get("reasoning") if judge_scores else None,
                         judge_scores.get("judge_model") if judge_scores else None,
                         eval_type,
+                        ab_variant,
                     ),
                 )
                 row = cur.fetchone()
@@ -352,3 +355,120 @@ def get_recent_evaluations(user_id: str, limit: int = 20) -> list[dict]:
     except Exception as e:
         logger.error("eval.store.recent_failed", error=str(e))
         return []
+
+
+# ── A/B Comparison ──────────────────────────────────────────
+
+def get_ab_comparison_stats(
+    test_name: str,
+    days: int = 30,
+) -> dict:
+    """Compare judge scores and usage metrics between A and B variants.
+
+    Queries the evaluations table filtered by ab_variant and joins with
+    usage_logs on message_id for cost/latency comparison.
+
+    Args:
+        test_name: The A/B test name (used to filter via ab_variant presence).
+        days: Number of past days to aggregate.
+
+    Returns:
+        Dict with per-variant stats and difference.
+    """
+    try:
+        conn = _get_connection()
+        try:
+            with conn.cursor() as cur:
+                # ── Per-variant judge score aggregates ──
+                cur.execute(
+                    """
+                    SELECT
+                        ab_variant,
+                        COUNT(*) AS total,
+                        AVG(judge_relevance) FILTER (WHERE judge_relevance IS NOT NULL) AS avg_relevance,
+                        AVG(judge_accuracy) FILTER (WHERE judge_accuracy IS NOT NULL) AS avg_accuracy,
+                        AVG(judge_helpfulness) FILTER (WHERE judge_helpfulness IS NOT NULL) AS avg_helpfulness,
+                        AVG(judge_safety) FILTER (WHERE judge_safety IS NOT NULL) AS avg_safety,
+                        AVG(judge_overall) FILTER (WHERE judge_overall IS NOT NULL) AS avg_overall,
+                        COUNT(*) FILTER (WHERE user_feedback = 1) AS thumbs_up,
+                        COUNT(*) FILTER (WHERE user_feedback = -1) AS thumbs_down
+                    FROM evaluations
+                    WHERE ab_variant IS NOT NULL
+                      AND created_at >= NOW() - INTERVAL '%s days'
+                    GROUP BY ab_variant
+                    ORDER BY ab_variant
+                    """,
+                    (days,),
+                )
+                variant_rows = cur.fetchall()
+
+                # ── Per-variant usage metrics (joined from usage_logs) ──
+                cur.execute(
+                    """
+                    SELECT
+                        u.ab_variant,
+                        COUNT(*) AS total,
+                        AVG(u.cost_usd) AS avg_cost,
+                        AVG(u.response_time_ms) AS avg_latency_ms
+                    FROM usage_logs u
+                    WHERE u.ab_variant IS NOT NULL
+                      AND u.created_at >= NOW() - INTERVAL '%s days'
+                    GROUP BY u.ab_variant
+                    ORDER BY u.ab_variant
+                    """,
+                    (days,),
+                )
+                usage_rows = cur.fetchall()
+
+            # Build per-variant dicts
+            def _build_variant(row, usage_map):
+                variant = row[0]
+                usage = usage_map.get(variant, {})
+                return {
+                    "variant": variant,
+                    "count": row[1] or 0,
+                    "avg_relevance": round(float(row[2] or 0), 3),
+                    "avg_accuracy": round(float(row[3] or 0), 3),
+                    "avg_helpfulness": round(float(row[4] or 0), 3),
+                    "avg_safety": round(float(row[5] or 0), 3),
+                    "avg_overall": round(float(row[6] or 0), 3),
+                    "thumbs_up": row[7] or 0,
+                    "thumbs_down": row[8] or 0,
+                    "avg_cost_usd": round(float(usage.get("avg_cost") or 0), 6),
+                    "avg_response_time_ms": round(float(usage.get("avg_latency_ms") or 0), 1),
+                }
+
+            usage_map = {r[0]: {"avg_cost": r[2], "avg_latency_ms": r[3]} for r in usage_rows}
+
+            variants = [_build_variant(row, usage_map) for row in variant_rows]
+
+            # Split into A and B
+            var_a = next((v for v in variants if v["variant"] == "A"), None)
+            var_b = next((v for v in variants if v["variant"] == "B"), None)
+
+            # Compute difference (B - A) for key metrics
+            diff = {}
+            if var_a and var_b:
+                for metric in ("avg_relevance", "avg_accuracy", "avg_helpfulness",
+                               "avg_safety", "avg_overall", "avg_cost_usd",
+                               "avg_response_time_ms"):
+                    a_val = var_a.get(metric, 0) or 0
+                    b_val = var_b.get(metric, 0) or 0
+                    diff[metric] = round(b_val - a_val, 6)
+                    if a_val != 0:
+                        diff[f"{metric}_pct"] = round((b_val - a_val) / a_val * 100, 2)
+                    else:
+                        diff[f"{metric}_pct"] = 0.0
+
+            return {
+                "test_name": test_name,
+                "period_days": days,
+                "variant_a": var_a,
+                "variant_b": var_b,
+                "difference_b_minus_a": diff,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error("eval.store.ab_comparison_failed", error=str(e))
+        return {"test_name": test_name, "period_days": days, "error": str(e)}
