@@ -4,7 +4,7 @@
 -- Run with:
 --   docker exec -i <db-container> psql -U autoagent -d autoagent_db < docker/migrate_add_ab_testing.sql
 
--- ── A/B Tests table ────────────────────────────────────────
+-- A/B Tests table -------------------------------------------
 CREATE TABLE IF NOT EXISTS ab_tests (
     id                SERIAL PRIMARY KEY,
     test_name         TEXT NOT NULL UNIQUE,          -- e.g. 'planner_v2_vs_v3'
@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS ab_tests (
 CREATE INDEX IF NOT EXISTS ab_tests_prompt_key_idx ON ab_tests (prompt_key);
 CREATE INDEX IF NOT EXISTS ab_tests_status_idx ON ab_tests (status);
 
--- Add ab_variant to evaluations for A/B comparison ──────
+-- Add ab_variant to evaluations for A/B comparison ---------
 ALTER TABLE evaluations
     ADD COLUMN IF NOT EXISTS ab_variant TEXT DEFAULT NULL;  -- 'A' or 'B' or NULL
 
@@ -29,7 +29,7 @@ CREATE INDEX IF NOT EXISTS evaluations_ab_variant_idx
     ON evaluations (ab_variant)
     WHERE ab_variant IS NOT NULL;
 
-── Add ab_variant to usage_logs for cost/latency comparison ──
+-- Add ab_variant to usage_logs for cost/latency comparison --
 ALTER TABLE usage_logs
     ADD COLUMN IF NOT EXISTS ab_variant TEXT DEFAULT NULL;
 
