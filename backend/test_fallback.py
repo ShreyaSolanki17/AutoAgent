@@ -107,7 +107,8 @@ class TestFallbackChain(unittest.TestCase):
         self.assertIn("openrouter", error_msg.lower())
 
     # ── Test 5: No API keys configured → RuntimeError ─────────
-    def test_no_keys_raises_runtime_error(self):
+    @patch("backend.llm.load_dotenv")
+    def test_no_keys_raises_runtime_error(self, mock_load_dotenv):
         """If no API keys are set, should raise RuntimeError."""
         env_clean = {k: v for k, v in os.environ.items()
                      if not k.endswith("_API_KEY")}
@@ -124,8 +125,9 @@ class TestFallbackChain(unittest.TestCase):
         self.assertEqual(names, ["groq", "google", "openrouter"])
 
     # ── Test 7: Only Google key set (no Groq) → uses Google ──
+    @patch("backend.llm.load_dotenv")
     @patch("openai.OpenAI")
-    def test_only_google_key(self, mock_openai):
+    def test_only_google_key(self, mock_openai, mock_load_dotenv):
         """If only GOOGLE_API_KEY is set, should use Google directly."""
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value.choices[0].message.content = "google reply"
