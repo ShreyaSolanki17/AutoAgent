@@ -2,7 +2,7 @@
 -- Stores A/B test definitions and tags evaluations + usage_logs with variant info
 --
 -- Run with:
---   docker exec -i <db-container> psql -U autoagent -d autoagent_db < docker/migrate_add_ab_testing.sql
+--   docker exec -i <db-container> psql -U autoagent -d autoagent_db < docker/migrate_06_add_ab_testing.sql
 
 -- A/B Tests table -------------------------------------------
 CREATE TABLE IF NOT EXISTS ab_tests (

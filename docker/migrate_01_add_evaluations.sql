@@ -2,12 +2,12 @@
 -- Stores both user feedback (thumbs up/down) and automated LLM-as-judge scores
 --
 -- Run with:
---   docker exec -i <db-container> psql -U autoagent -d autoagent_db < docker/migrate_add_evaluations.sql
+--   docker exec -i <db-container> psql -U autoagent -d autoagent_db < docker/migrate_01_add_evaluations.sql
 
 CREATE TABLE IF NOT EXISTS evaluations (
     id              SERIAL PRIMARY KEY,
     user_id         TEXT NOT NULL DEFAULT 'anonymous',
-    message_id      TEXT NOT NULL,                  -- unique correlation ID per response
+    message_id      TEXT NOT NULL UNIQUE,           -- unique correlation ID per response
     user_goal       TEXT NOT NULL DEFAULT '',       -- the original user message
     final_answer    TEXT NOT NULL DEFAULT '',       -- the agent's response
     trace_hash      TEXT,                           -- hash of trace for correlation
@@ -28,9 +28,8 @@ CREATE TABLE IF NOT EXISTS evaluations (
     updated_at      TIMESTAMP DEFAULT NOW()
 );
 
--- Unique constraint for upsert support (auto-evaluate first, user feedback later)
-ALTER TABLE evaluations
-    ADD CONSTRAINT IF NOT EXISTS evaluations_message_id_unique UNIQUE (message_id);
+-- message_id has a UNIQUE constraint above for upsert support
+-- (auto-evaluate first, user feedback later via ON CONFLICT).
 
 -- Indexes for common query patterns
 CREATE INDEX IF NOT EXISTS evaluations_user_idx

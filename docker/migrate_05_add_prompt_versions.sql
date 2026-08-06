@@ -2,7 +2,7 @@
 -- Stores versioned prompts with lifecycle: draft → staging → production → archived
 --
 -- Run with:
---   docker exec -i <db-container> psql -U autoagent -d autoagent_db < docker/migrate_add_prompt_versions.sql
+--   docker exec -i <db-container> psql -U autoagent -d autoagent_db < docker/migrate_05_add_prompt_versions.sql
 
 CREATE TABLE IF NOT EXISTS prompt_versions (
     id              SERIAL PRIMARY KEY,

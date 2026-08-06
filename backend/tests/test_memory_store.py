@@ -145,7 +145,7 @@ class TestCleanupStatus(unittest.TestCase):
 # ── DB Tests (require PostgreSQL) ──────────────────────────
 
 @pytest.mark.db
-class TestMemoryDB(unittest.TestCase):
+class TestMemoryDB:
     """Tests that require a real PostgreSQL + pgvector database.
 
     Use:  pytest backend/tests/test_memory_store.py -m db
@@ -155,10 +155,10 @@ class TestMemoryDB(unittest.TestCase):
     def test_save_and_retrieve(self, db_conn, mock_embeddings):
         from backend.memory.store import save_memory, search_memories
         mid = save_memory("My name is TestUser", user_id="test_user")
-        self.assertIsInstance(mid, int)
+        assert isinstance(mid, int)
         results = search_memories("TestUser", user_id="test_user")
-        self.assertGreater(len(results), 0)
-        self.assertIn("TestUser", results[0]["content"])
+        assert len(results) > 0
+        assert "TestUser" in results[0]["content"]
 
     def test_dedup_tier1_refresh(self, db_conn, mock_embeddings):
         from backend.memory.store import save_memory, get_all_memories
@@ -166,7 +166,7 @@ class TestMemoryDB(unittest.TestCase):
         save_memory("I like pizza", user_id="dedup_test")  # near-identical
         memories = get_all_memories(user_id="dedup_test")
         # Should still be 1 memory (refreshed, not duplicated)
-        self.assertEqual(len(memories), 1)
+        assert len(memories) == 1
 
     def test_expired_memories_excluded(self, db_conn, mock_embeddings):
         from backend.memory.store import save_memory, search_memories
@@ -174,7 +174,7 @@ class TestMemoryDB(unittest.TestCase):
         save_memory("I like sushi", user_id="exp_test", ttl_days=0)
         results = search_memories("sushi", user_id="exp_test")
         # Expired memories are excluded from search
-        self.assertEqual(len(results), 0)
+        assert len(results) == 0
 
     def test_pruning_evicts_low_importance(self, db_conn, mock_embeddings):
         from backend.memory.store import save_memory, get_all_memories, _prune_if_needed
@@ -183,9 +183,9 @@ class TestMemoryDB(unittest.TestCase):
             save_memory(f"Query {i}", user_id="prune_test")
         # Prune to max 3
         pruned = _prune_if_needed("prune_test", max_memories=3)
-        self.assertGreater(pruned, 0)
+        assert pruned > 0
         remaining = get_all_memories(user_id="prune_test")
-        self.assertLessEqual(len(remaining), 3)
+        assert len(remaining) <= 3
 
     def test_pruning_protects_high_importance(self, db_conn, mock_embeddings):
         from backend.memory.store import save_memory, get_all_memories, _prune_if_needed
@@ -199,7 +199,7 @@ class TestMemoryDB(unittest.TestCase):
         remaining = get_all_memories(user_id="protect_test")
         # The identity fact should still be there
         contents = [m["content"] for m in remaining]
-        self.assertIn("My name is ProtectedUser", contents)
+        assert "My name is ProtectedUser" in contents
 
     def test_user_isolation(self, db_conn, mock_embeddings):
         from backend.memory.store import save_memory, search_memories
@@ -209,6 +209,6 @@ class TestMemoryDB(unittest.TestCase):
         results_b = search_memories("secret", user_id="user_b")
         # Each user should only see their own memory
         for r in results_a:
-            self.assertIn("User A", r["content"])
+            assert "User A" in r["content"]
         for r in results_b:
-            self.assertIn("User B", r["content"])
+            assert "User B" in r["content"]

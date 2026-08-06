@@ -84,11 +84,13 @@ def db_conn():
     finally:
         admin_conn.close()
 
-    # Connect to test DB, enable pgvector, run migrations
+    # Connect to test DB, run migrations (creates the vector extension), then
+    # register the vector type — must happen in that order, or register_vector
+    # fails because the extension it needs doesn't exist yet.
     test_conn = _connect(test_db)
-    register_vector(test_conn)
     try:
         _run_migrations(test_conn)
+        register_vector(test_conn)
     except Exception:
         test_conn.close()
         # Clean up on setup failure
