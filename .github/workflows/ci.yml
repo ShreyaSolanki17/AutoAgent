@@ -108,7 +108,7 @@ jobs:
       - name: Extract metadata
         id: meta
         run: |
-          IMAGE="ghcr.io/${{ github.repository_owner }}/autoagent-backend"
+          IMAGE="ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/autoagent-backend"
           TAG="${{ github.sha }}"
           echo "tags=${IMAGE}:${TAG},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
 
