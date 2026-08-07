@@ -159,13 +159,15 @@ def promote_prompt(prompt_key: str, version: int, target_status: str) -> bool:
         else:
             return False  # invalid transition
 
-        # If promoting to production, archive current production
-        if target_status == "production":
-            cur.execute(
-                """UPDATE prompt_versions SET status = 'archived'
-                   WHERE prompt_key = %s AND status = 'production'""",
-                (prompt_key,),
-            )
+        # Archive whatever version currently holds the target status, so at
+        # most one version is ever 'staging' (or 'production') per key —
+        # otherwise get_active_prompt's LIMIT 1 picks an arbitrary one among
+        # ties.
+        cur.execute(
+            """UPDATE prompt_versions SET status = 'archived'
+               WHERE prompt_key = %s AND status = %s""",
+            (prompt_key, target_status),
+        )
 
         # Promote the version
         cur.execute(

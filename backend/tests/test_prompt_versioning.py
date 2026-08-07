@@ -187,6 +187,20 @@ class TestPromptStoreDB:
         result = promote_prompt("PLANNER_SYSTEM", 1, "production")
         assert result is True
 
+    def test_promote_to_staging_archives_old_staging(self, db_conn):
+        """Promoting a second version to staging should archive the first —
+        otherwise two versions are 'staging' at once and get_active_prompt's
+        LIMIT 1 picks an arbitrary one among ties."""
+        create_prompt_version("PLANNER_SYSTEM", "v1 content")
+        promote_prompt("PLANNER_SYSTEM", 1, "staging")
+
+        create_prompt_version("PLANNER_SYSTEM", "v2 content")
+        result = promote_prompt("PLANNER_SYSTEM", 2, "staging")
+        assert result is True
+
+        assert get_version("PLANNER_SYSTEM", 1)["status"] == "archived"
+        assert get_version("PLANNER_SYSTEM", 2)["status"] == "staging"
+
         v = get_version("PLANNER_SYSTEM", 1)
         assert v["status"] == "production"
         assert v["promoted_at"] is not None
@@ -234,6 +248,35 @@ class TestPromptStoreDB:
         # v2 should be archived
         v2 = get_version("PLANNER_SYSTEM", 2)
         assert v2["status"] == "archived"
+
+    def test_rollback_goes_to_immediately_preceding_version(self, db_conn):
+        """With 3+ versions, rollback must land on the version right before
+        current production — not just any archived version. A regression
+        here is subtler than test_rollback catches: an implementation that
+        picks the *highest-numbered* archived version (which, right after
+        archiving current production, is the version just archived) passes
+        a 2-version test by re-promoting itself, but silently rolls back to
+        the wrong version once there's a longer history.
+        """
+        create_prompt_version("PLANNER_SYSTEM", "v1 content")
+        promote_prompt("PLANNER_SYSTEM", 1, "staging")
+        promote_prompt("PLANNER_SYSTEM", 1, "production")
+
+        create_prompt_version("PLANNER_SYSTEM", "v2 content")
+        promote_prompt("PLANNER_SYSTEM", 2, "staging")
+        promote_prompt("PLANNER_SYSTEM", 2, "production")  # archives v1
+
+        create_prompt_version("PLANNER_SYSTEM", "v3 content")
+        promote_prompt("PLANNER_SYSTEM", 3, "staging")
+        promote_prompt("PLANNER_SYSTEM", 3, "production")  # archives v2
+
+        result = rollback_prompt("PLANNER_SYSTEM")
+        assert result is True
+
+        # Should land on v2 (immediately preceding), not v1 or v3
+        assert get_version("PLANNER_SYSTEM", 2)["status"] == "production"
+        assert get_version("PLANNER_SYSTEM", 1)["status"] == "archived"
+        assert get_version("PLANNER_SYSTEM", 3)["status"] == "archived"
 
     def test_rollback_fails_without_production(self, db_conn):
         """Rollback should fail if there's no production version."""
