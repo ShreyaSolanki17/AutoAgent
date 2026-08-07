@@ -10,9 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies (pinned lockfile for reproducible builds)
+COPY requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
 
 # Pre-download the sentence-transformers model (~80MB)
 # This avoids a 30-second cold start on every container startup
