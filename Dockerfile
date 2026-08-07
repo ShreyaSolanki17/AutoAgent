@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Pre-download the sentence-transformers model (~80MB)
 # This avoids a 30-second cold start on every container startup
@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
 # Copy installed Python packages from builder
-COPY --from=builder /install /usr/local
+COPY --from=builder /usr/local /usr/local
 
 # Copy pre-downloaded model cache from builder
 COPY --from=builder /root/.cache/torch /root/.cache/torch
