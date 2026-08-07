@@ -210,6 +210,19 @@ def rollback_prompt(prompt_key: str) -> bool:
         if not row:
             return False
 
+        # Find the version to restore *before* archiving current production —
+        # otherwise the version we're about to archive (the highest version
+        # number) becomes its own answer to "most recent archived version",
+        # and rollback just re-promotes itself instead of the previous one.
+        cur.execute(
+            """SELECT MAX(version) FROM prompt_versions
+               WHERE prompt_key = %s AND status = 'archived'""",
+            (prompt_key,),
+        )
+        prev_version = cur.fetchone()[0]
+        if prev_version is None:
+            return False  # nothing to roll back to
+
         # Archive current production
         cur.execute(
             """UPDATE prompt_versions SET status = 'archived'
@@ -217,14 +230,11 @@ def rollback_prompt(prompt_key: str) -> bool:
             (prompt_key,),
         )
 
-        # Re-activate the most recent archived version
+        # Re-activate the previously found version
         cur.execute(
             """UPDATE prompt_versions SET status = 'production'
-               WHERE prompt_key = %s AND version = (
-                   SELECT MAX(version) FROM prompt_versions
-                   WHERE prompt_key = %s AND status = 'archived'
-               )""",
-            (prompt_key, prompt_key),
+               WHERE prompt_key = %s AND version = %s""",
+            (prompt_key, prev_version),
         )
 
         conn.commit()

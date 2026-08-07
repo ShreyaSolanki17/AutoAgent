@@ -7,6 +7,7 @@ Provides:
 """
 
 import os
+import random
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -37,14 +38,22 @@ def mock_llm():
 
 @pytest.fixture
 def mock_embeddings():
-    """Mock the embedding model to return a fixed 384-dim vector.
+    """Mock the embedding model to return a deterministic per-text 384-dim vector.
 
     Avoids downloading the ~80MB ``all-MiniLM-L6-v2`` model in tests that
-    only need to verify dedup/TTL/importance logic.
+    only need to verify dedup/TTL/importance logic. The vector is seeded by
+    the text itself, so identical text always yields identical vectors
+    (dedup tests still work) but distinct text yields near-orthogonal
+    vectors (pruning/isolation tests don't spuriously collide as dupes) —
+    a single fixed vector for every input would make save_memory's
+    similarity-based dedup treat all saved content as one duplicate row.
     """
-    fixed_vector = [0.01] * 384
-    with patch("backend.memory.store.embed_text", return_value=fixed_vector):
-        yield fixed_vector
+    def _fake_embed(text: str) -> list[float]:
+        rng = random.Random(text)
+        return [rng.uniform(-1, 1) for _ in range(384)]
+
+    with patch("backend.memory.store.embed_text", side_effect=_fake_embed):
+        yield _fake_embed
 
 
 @pytest.fixture

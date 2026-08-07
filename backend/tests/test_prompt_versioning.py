@@ -140,6 +140,7 @@ class TestPromptStoreDB:
     def test_get_active_prompt_production(self, db_conn):
         """get_active_prompt should return production prompt for production env."""
         create_prompt_version("PLANNER_SYSTEM", "prod content")
+        promote_prompt("PLANNER_SYSTEM", 1, "staging")
         promote_prompt("PLANNER_SYSTEM", 1, "production")
 
         content = get_active_prompt("PLANNER_SYSTEM", environment="production")
@@ -148,6 +149,7 @@ class TestPromptStoreDB:
     def test_get_active_prompt_staging_fallback(self, db_conn):
         """Staging env should fall back to production when no staging exists."""
         create_prompt_version("PLANNER_SYSTEM", "prod content")
+        promote_prompt("PLANNER_SYSTEM", 1, "staging")
         promote_prompt("PLANNER_SYSTEM", 1, "production")
 
         content = get_active_prompt("PLANNER_SYSTEM", environment="staging")
@@ -156,6 +158,7 @@ class TestPromptStoreDB:
     def test_get_active_prompt_staging_preferred(self, db_conn):
         """Staging env should prefer staging over production."""
         create_prompt_version("PLANNER_SYSTEM", "prod content")
+        promote_prompt("PLANNER_SYSTEM", 1, "staging")
         promote_prompt("PLANNER_SYSTEM", 1, "production")
         create_prompt_version("PLANNER_SYSTEM", "staging content")
         promote_prompt("PLANNER_SYSTEM", 2, "staging")
@@ -192,6 +195,7 @@ class TestPromptStoreDB:
         """When promoting to production, the old production version should be archived."""
         # Create v1 as production
         create_prompt_version("PLANNER_SYSTEM", "v1 content")
+        promote_prompt("PLANNER_SYSTEM", 1, "staging")
         promote_prompt("PLANNER_SYSTEM", 1, "production")
 
         # Create v2, promote to staging then production
@@ -211,6 +215,7 @@ class TestPromptStoreDB:
         """Rollback should archive current production and re-activate previous."""
         # v1 → production
         create_prompt_version("PLANNER_SYSTEM", "v1 content")
+        promote_prompt("PLANNER_SYSTEM", 1, "staging")
         promote_prompt("PLANNER_SYSTEM", 1, "production")
 
         # v2 → staging → production (auto-archives v1)
@@ -273,6 +278,7 @@ class TestPromptStoreDB:
     def test_delete_production_version_fails(self, db_conn):
         """Deleting a non-draft version should fail."""
         create_prompt_version("PLANNER_SYSTEM", "prod content")
+        promote_prompt("PLANNER_SYSTEM", 1, "staging")
         promote_prompt("PLANNER_SYSTEM", 1, "production")
 
         result = delete_version("PLANNER_SYSTEM", 1)
