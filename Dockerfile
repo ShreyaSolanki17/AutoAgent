@@ -35,7 +35,6 @@ RUN groupadd -r appuser && useradd -r -g appuser appuser
 COPY --from=builder /usr/local /usr/local
 
 # Copy pre-downloaded model cache from builder
-COPY --from=builder /root/.cache/torch /root/.cache/torch
 COPY --from=builder /root/.cache/huggingface /root/.cache/huggingface
 
 # Copy application code
