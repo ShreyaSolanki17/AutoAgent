@@ -187,6 +187,10 @@ class TestPromptStoreDB:
         result = promote_prompt("PLANNER_SYSTEM", 1, "production")
         assert result is True
 
+        v = get_version("PLANNER_SYSTEM", 1)
+        assert v["status"] == "production"
+        assert v["promoted_at"] is not None
+
     def test_promote_to_staging_archives_old_staging(self, db_conn):
         """Promoting a second version to staging should archive the first —
         otherwise two versions are 'staging' at once and get_active_prompt's
@@ -200,10 +204,6 @@ class TestPromptStoreDB:
 
         assert get_version("PLANNER_SYSTEM", 1)["status"] == "archived"
         assert get_version("PLANNER_SYSTEM", 2)["status"] == "staging"
-
-        v = get_version("PLANNER_SYSTEM", 1)
-        assert v["status"] == "production"
-        assert v["promoted_at"] is not None
 
     def test_promote_auto_archives_old_production(self, db_conn):
         """When promoting to production, the old production version should be archived."""
@@ -342,6 +342,26 @@ class TestPromptStoreDB:
         """get_version should return None for non-existent version."""
         v = get_version("PLANNER_SYSTEM", 999)
         assert v is None
+
+    def test_db_rejects_second_production_row(self, db_conn):
+        """The partial unique index, not just app logic, must block two
+        'production' rows for the same key — this is what actually closes
+        the race between two concurrent promote_prompt() calls."""
+        import psycopg2
+
+        create_prompt_version("PLANNER_SYSTEM", "v1")
+        promote_prompt("PLANNER_SYSTEM", 1, "staging")
+        promote_prompt("PLANNER_SYSTEM", 1, "production")
+
+        create_prompt_version("PLANNER_SYSTEM", "v2")
+        cur = db_conn.cursor()
+        with pytest.raises(psycopg2.errors.UniqueViolation):
+            cur.execute(
+                "UPDATE prompt_versions SET status = 'production' "
+                "WHERE prompt_key = %s AND version = 2",
+                ("PLANNER_SYSTEM",),
+            )
+        db_conn.rollback()
 
 
 # ═══════════════════════════════════════════════════════════
