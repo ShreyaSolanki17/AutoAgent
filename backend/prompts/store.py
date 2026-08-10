@@ -11,7 +11,11 @@ from pathlib import Path
 import psycopg2
 from dotenv import load_dotenv
 
+from backend.logging_config import get_logger
+
 load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
+
+logger = get_logger(__name__)
 
 
 def _get_connection():
@@ -63,7 +67,11 @@ def get_active_prompt(prompt_key: str, environment: str = "production") -> str |
 
         row = cur.fetchone()
         return row[0] if row else None
-    except Exception:
+    except Exception as e:
+        # Logged because this looks identical to "no prompt configured" to
+        # every caller otherwise — a DB outage would silently look like a
+        # normal cold-start fallback instead of the failure it is.
+        logger.error("prompts.store.db_error", fn="get_active_prompt", prompt_key=prompt_key, error=str(e))
         return None
     finally:
         if conn:
@@ -177,9 +185,10 @@ def promote_prompt(prompt_key: str, version: int, target_status: str) -> bool:
         )
         conn.commit()
         return True
-    except Exception:
+    except Exception as e:
         if conn:
             conn.rollback()
+        logger.error("prompts.store.db_error", fn="promote_prompt", prompt_key=prompt_key, version=version, error=str(e))
         return False
     finally:
         if conn:
@@ -241,9 +250,10 @@ def rollback_prompt(prompt_key: str) -> bool:
 
         conn.commit()
         return True
-    except Exception:
+    except Exception as e:
         if conn:
             conn.rollback()
+        logger.error("prompts.store.db_error", fn="rollback_prompt", prompt_key=prompt_key, error=str(e))
         return False
     finally:
         if conn:
@@ -274,7 +284,8 @@ def list_versions(prompt_key: str, limit: int = 50) -> list[dict]:
         )
         columns = [desc[0] for desc in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
-    except Exception:
+    except Exception as e:
+        logger.error("prompts.store.db_error", fn="list_versions", prompt_key=prompt_key, error=str(e))
         return []
     finally:
         if conn:
@@ -295,21 +306,6 @@ def list_all_active(environment: str = "production") -> dict[str, str]:
         conn = _get_connection()
         cur = conn.cursor()
 
-        # Get production prompts first
-        cur.execute(
-            """SELECT DISTINCT ON (prompt_key) prompt_key, content, status
-               FROM prompt_versions
-               WHERE status IN ('production', 'staging')
-               ORDER BY prompt_key,
-                        CASE WHEN status = 'staging' THEN 0 ELSE 1 END""",
-        )
-        results = {}
-        for row in cur.fetchall():
-            prompt_key = row[0]
-            if prompt_key not in results:
-                results[prompt_key] = row[2]  # store status temporarily
-
-        # Re-query to get content for the right status per environment
         prompts = {}
         cur.execute(
             "SELECT prompt_key, content, status FROM prompt_versions WHERE status IN ('production', 'staging')",
@@ -343,7 +339,8 @@ def list_all_active(environment: str = "production") -> dict[str, str]:
                         break
 
         return prompts
-    except Exception:
+    except Exception as e:
+        logger.error("prompts.store.db_error", fn="list_all_active", environment=environment, error=str(e))
         return {}
     finally:
         if conn:
@@ -367,9 +364,10 @@ def delete_version(prompt_key: str, version: int) -> bool:
         )
         conn.commit()
         return cur.rowcount > 0
-    except Exception:
+    except Exception as e:
         if conn:
             conn.rollback()
+        logger.error("prompts.store.db_error", fn="delete_version", prompt_key=prompt_key, version=version, error=str(e))
         return False
     finally:
         if conn:
@@ -398,7 +396,8 @@ def get_version(prompt_key: str, version: int) -> dict | None:
             return None
         columns = [desc[0] for desc in cur.description]
         return dict(zip(columns, row))
-    except Exception:
+    except Exception as e:
+        logger.error("prompts.store.db_error", fn="get_version", prompt_key=prompt_key, version=version, error=str(e))
         return None
     finally:
         if conn:

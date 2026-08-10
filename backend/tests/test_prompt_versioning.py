@@ -17,6 +17,7 @@ from backend.prompts.store import (
     get_active_prompt,
     get_version,
     list_versions,
+    list_all_active,
     promote_prompt,
     rollback_prompt,
     delete_version,
@@ -342,6 +343,36 @@ class TestPromptStoreDB:
         """get_version should return None for non-existent version."""
         v = get_version("PLANNER_SYSTEM", 999)
         assert v is None
+
+    def test_list_all_active_production(self, db_conn):
+        """list_all_active(production) returns only production content, keyed by prompt_key."""
+        create_prompt_version("PLANNER_SYSTEM", "planner prod")
+        promote_prompt("PLANNER_SYSTEM", 1, "staging")
+        promote_prompt("PLANNER_SYSTEM", 1, "production")
+
+        create_prompt_version("OBSERVER_SYSTEM", "observer draft")  # stays draft
+
+        active = list_all_active(environment="production")
+        assert active == {"PLANNER_SYSTEM": "planner prod"}
+
+    def test_list_all_active_staging_prefers_staging(self, db_conn):
+        """list_all_active(staging) prefers the staging version over production
+        for a key, but falls back to production for a key with no staging."""
+        create_prompt_version("PLANNER_SYSTEM", "planner prod")
+        promote_prompt("PLANNER_SYSTEM", 1, "staging")
+        promote_prompt("PLANNER_SYSTEM", 1, "production")
+        create_prompt_version("PLANNER_SYSTEM", "planner staging")
+        promote_prompt("PLANNER_SYSTEM", 2, "staging")
+
+        create_prompt_version("OBSERVER_SYSTEM", "observer prod")
+        promote_prompt("OBSERVER_SYSTEM", 1, "staging")
+        promote_prompt("OBSERVER_SYSTEM", 1, "production")  # no staging version
+
+        active = list_all_active(environment="staging")
+        assert active == {
+            "PLANNER_SYSTEM": "planner staging",
+            "OBSERVER_SYSTEM": "observer prod",
+        }
 
     def test_db_rejects_second_production_row(self, db_conn):
         """The partial unique index, not just app logic, must block two
