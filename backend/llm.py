@@ -30,16 +30,38 @@ _TEMPERATURE = TEMPERATURE
 _MAX_TOKENS = MAX_TOKENS
 
 
-def _call_groq(messages: list[dict[str, str]], api_key: str) -> str:
-    """Call Groq API (native SDK)."""
+def _groq_response(messages: list[dict[str, str]], api_key: str):
+    """Call Groq API (native SDK), returning the raw response (text + usage)."""
     client = Groq(api_key=api_key)
-    response = client.chat.completions.create(
+    return client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=messages,
         temperature=_TEMPERATURE,
         max_tokens=_MAX_TOKENS,
     )
-    return response.choices[0].message.content
+
+
+def _call_groq(messages: list[dict[str, str]], api_key: str) -> str:
+    return _groq_response(messages, api_key).choices[0].message.content
+
+
+def _openai_compatible_response(
+    messages: list[dict[str, str]],
+    api_key: str,
+    model: str,
+    base_url: str,
+):
+    """Call any OpenAI-compatible endpoint (Google, OpenRouter, etc.), returning
+    the raw response (text + usage)."""
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    return client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=_TEMPERATURE,
+        max_tokens=_MAX_TOKENS,
+    )
 
 
 def _call_openai_compatible(
@@ -48,17 +70,7 @@ def _call_openai_compatible(
     model: str,
     base_url: str,
 ) -> str:
-    """Call any OpenAI-compatible endpoint (Google, OpenRouter, etc.)."""
-    from openai import OpenAI
-
-    client = OpenAI(api_key=api_key, base_url=base_url)
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        temperature=_TEMPERATURE,
-        max_tokens=_MAX_TOKENS,
-    )
-    return response.choices[0].message.content
+    return _openai_compatible_response(messages, api_key, model, base_url).choices[0].message.content
 
 
 def call_llm(messages: list[dict[str, str]]) -> str:
@@ -133,7 +145,7 @@ def call_llm(messages: list[dict[str, str]]) -> str:
     )
 
 
-def call_llm_as(provider: dict, messages: list[dict[str, str]]) -> str:
+def call_llm_as(provider: dict, messages: list[dict[str, str]]) -> dict:
     """Call one specific provider directly — no fallback chain.
 
     Used by debate mode, where all 3 providers must each be called
@@ -145,7 +157,10 @@ def call_llm_as(provider: dict, messages: list[dict[str, str]]) -> str:
         messages: OpenAI-format chat messages.
 
     Returns:
-        The model's response text.
+        {"text": str, "input_tokens": int, "output_tokens": int} — token
+        counts come straight from the provider's own usage field (both Groq
+        and the OpenAI-compatible providers report prompt/completion tokens),
+        so debate mode's cost tracking reflects real usage, not an estimate.
 
     Raises:
         RuntimeError: if the provider's API key isn't configured, or the call fails.
@@ -158,7 +173,15 @@ def call_llm_as(provider: dict, messages: list[dict[str, str]]) -> str:
 
     try:
         if provider["base_url"] is None:
-            return _call_groq(messages, api_key)
-        return _call_openai_compatible(messages, api_key, provider["model"], provider["base_url"])
+            response = _groq_response(messages, api_key)
+        else:
+            response = _openai_compatible_response(messages, api_key, provider["model"], provider["base_url"])
+
+        usage = getattr(response, "usage", None)
+        return {
+            "text": response.choices[0].message.content,
+            "input_tokens": getattr(usage, "prompt_tokens", 0) or 0,
+            "output_tokens": getattr(usage, "completion_tokens", 0) or 0,
+        }
     except Exception as e:
         raise RuntimeError(f"{provider['name']}: {e}") from e

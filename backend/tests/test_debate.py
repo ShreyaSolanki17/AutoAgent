@@ -22,20 +22,24 @@ class TestGenerateCandidates(unittest.TestCase):
 
     @patch("backend.agent.debate.call_llm_as")
     def test_all_providers_called(self, mock_call):
-        mock_call.side_effect = lambda provider, messages: f"answer from {provider['name']}"
+        mock_call.side_effect = lambda provider, messages: {
+            "text": f"answer from {provider['name']}", "input_tokens": 10, "output_tokens": 20,
+        }
         results = generate_candidates("question")
         self.assertEqual(len(results), len(PROVIDERS))
         self.assertEqual({r["provider"] for r in results}, {p["name"] for p in PROVIDERS})
         for r in results:
             self.assertIsNone(r["error"])
             self.assertIn("answer from", r["answer"])
+            self.assertEqual(r["input_tokens"], 10)
+            self.assertEqual(r["output_tokens"], 20)
 
     @patch("backend.agent.debate.call_llm_as")
     def test_one_provider_failing_does_not_affect_others(self, mock_call):
         def fake_call(provider, messages):
             if provider["name"] == PROVIDERS[1]["name"]:
                 raise RuntimeError("boom")
-            return "ok"
+            return {"text": "ok", "input_tokens": 1, "output_tokens": 1}
         mock_call.side_effect = fake_call
 
         results = generate_candidates("question")
@@ -60,7 +64,7 @@ class TestCritiqueRound(unittest.TestCase):
 
         def fake_call(provider, messages):
             captured[provider["name"]] = messages[1]["content"]
-            return f"{provider['name']} revised"
+            return {"text": f"{provider['name']} revised", "input_tokens": 1, "output_tokens": 1}
 
         mock_call.side_effect = fake_call
         names = [p["name"] for p in PROVIDERS]
@@ -81,7 +85,7 @@ class TestCritiqueRound(unittest.TestCase):
 
     @patch("backend.agent.debate.call_llm_as")
     def test_failed_candidate_passed_through_unchanged(self, mock_call):
-        mock_call.side_effect = lambda provider, messages: "revised"
+        mock_call.side_effect = lambda provider, messages: {"text": "revised", "input_tokens": 1, "output_tokens": 1}
         names = [p["name"] for p in PROVIDERS]
         candidates = [
             {"provider": names[0], "model": "m", "answer": "A1", "error": None},

@@ -36,14 +36,22 @@ def _generate_one(provider: dict, user_goal: str) -> dict:
     a failed/unconfigured provider comes back with answer="" and error set,
     so one bad provider can't take down the whole debate."""
     try:
-        answer = call_llm_as(provider, [
+        result = call_llm_as(provider, [
             {"role": "system", "content": DEBATER_SYSTEM_PROMPT},
             {"role": "user", "content": user_goal},
         ])
-        return {"provider": provider["name"], "model": provider["model"], "answer": answer.strip(), "error": None}
+        return {
+            "provider": provider["name"], "model": provider["model"],
+            "answer": result["text"].strip(), "error": None,
+            "input_tokens": result["input_tokens"], "output_tokens": result["output_tokens"],
+        }
     except Exception as e:
         logger.warning("debate.generate_failed", provider=provider["name"], error=str(e))
-        return {"provider": provider["name"], "model": provider["model"], "answer": "", "error": str(e)}
+        return {
+            "provider": provider["name"], "model": provider["model"],
+            "answer": "", "error": str(e),
+            "input_tokens": 0, "output_tokens": 0,
+        }
 
 
 def generate_candidates(user_goal: str) -> list[dict]:
@@ -94,14 +102,20 @@ def _critique_one(candidate: dict, others: list[dict], user_goal: str) -> dict:
     )
     provider = next(p for p in PROVIDERS if p["name"] == candidate["provider"])
     try:
-        revised = call_llm_as(provider, [
+        result = call_llm_as(provider, [
             {"role": "system", "content": CRITIC_SYSTEM_PROMPT},
             {"role": "user", "content": user_msg},
         ])
-        return {**candidate, "revised_answer": revised.strip(), "critique_error": None}
+        return {
+            **candidate, "revised_answer": result["text"].strip(), "critique_error": None,
+            "critique_input_tokens": result["input_tokens"], "critique_output_tokens": result["output_tokens"],
+        }
     except Exception as e:
         logger.warning("debate.critique_failed", provider=candidate["provider"], error=str(e))
-        return {**candidate, "revised_answer": candidate["answer"], "critique_error": str(e)}
+        return {
+            **candidate, "revised_answer": candidate["answer"], "critique_error": str(e),
+            "critique_input_tokens": 0, "critique_output_tokens": 0,
+        }
 
 
 def critique_round(user_goal: str, candidates: list[dict]) -> list[dict]:
@@ -124,7 +138,8 @@ def critique_round(user_goal: str, candidates: list[dict]) -> list[dict]:
     if len(successful) < 2:
         logger.warning("debate.critique_skipped", successful_count=len(successful))
         return [
-            {**c, "revised_answer": c["answer"], "critique_error": "skipped: fewer than 2 successful candidates to critique against"}
+            {**c, "revised_answer": c["answer"], "critique_error": "skipped: fewer than 2 successful candidates to critique against",
+             "critique_input_tokens": 0, "critique_output_tokens": 0}
             for c in candidates
         ]
 
@@ -135,7 +150,8 @@ def critique_round(user_goal: str, candidates: list[dict]) -> list[dict]:
 
     revised_by_provider = {r["provider"]: r for r in revised}
     return [
-        revised_by_provider.get(c["provider"], {**c, "revised_answer": "", "critique_error": c["error"]})
+        revised_by_provider.get(c["provider"], {**c, "revised_answer": "", "critique_error": c["error"],
+                                                 "critique_input_tokens": 0, "critique_output_tokens": 0})
         for c in candidates
     ]
 
@@ -150,6 +166,7 @@ def run_debate(user_goal: str, user_id: str = "default") -> dict:
     """
     from backend.evaluation.judge import judge_debate  # local import: keeps the
     # judge <-> debate module boundary one-directional (judge.py never imports debate.py)
+    from backend.middleware.usage import get_cost
 
     start = time.time()
     logger.info("debate.run_started", user_id=user_id, goal=user_goal[:100])
@@ -175,11 +192,31 @@ def run_debate(user_goal: str, user_id: str = "default") -> dict:
         judged = {"scores": {}, "reasoning": "no candidates succeeded", "judge_model": "none"}
 
     elapsed_ms = round((time.time() - start) * 1000)
+
+    # Real token/cost accounting: sum generation + critique tokens per provider,
+    # priced at that provider's own rate (a 3-provider panel isn't one bill).
+    # The judge/synthesis call itself still uses the untracked call_llm() fallback
+    # chain (same pre-existing gap as evaluate_response() has) so isn't counted here.
+    total_input_tokens = sum(c.get("input_tokens", 0) for c in candidates) + \
+        sum(r.get("critique_input_tokens", 0) for r in revised)
+    total_output_tokens = sum(c.get("output_tokens", 0) for c in candidates) + \
+        sum(r.get("critique_output_tokens", 0) for r in revised)
+    total_cost = sum(
+        get_cost(c["provider"], c["model"], c.get("input_tokens", 0), c.get("output_tokens", 0))
+        for c in candidates
+    ) + sum(
+        get_cost(r["provider"], r["model"], r.get("critique_input_tokens", 0), r.get("critique_output_tokens", 0))
+        for r in revised
+    )
+
     logger.info(
         "debate.run_completed",
         user_id=user_id,
         elapsed_ms=elapsed_ms,
         succeeded=[c["provider"] for c in candidates if not c["error"]],
+        input_tokens=total_input_tokens,
+        output_tokens=total_output_tokens,
+        cost_usd=round(total_cost, 8),
     )
 
     return {
@@ -189,14 +226,11 @@ def run_debate(user_goal: str, user_id: str = "default") -> dict:
         "used_tools": [],
         "ab_variant": None,
         "usage": {
-            # ponytail: token/cost accounting isn't wired up for debate calls yet —
-            # call_llm_as() discards each SDK response's usage_metadata. Real numbers
-            # get measured properly in Step 7, not guessed here.
-            "input_tokens": 0,
-            "output_tokens": 0,
+            "input_tokens": total_input_tokens,
+            "output_tokens": total_output_tokens,
             "provider": "debate",
             "model": "+".join(p["name"] for p in PROVIDERS),
-            "cost_usd": 0.0,
+            "cost_usd": round(total_cost, 8),
             "response_time_ms": elapsed_ms,
         },
         "debate": {

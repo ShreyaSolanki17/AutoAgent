@@ -76,6 +76,21 @@ def _get_llm() -> ChatGroq | ChatOpenAI:
     )
 
 
+def _extract_usage(response) -> dict:
+    """Pull {input_tokens, output_tokens} out of a LangChain LLM response.
+
+    Every plan/observe LLM call goes through this so run_agent() can report
+    real token/cost totals instead of the pre-existing gap where only the
+    rare max-iterations fallback call was ever counted.
+    """
+    if getattr(response, "usage_metadata", None):
+        return {
+            "input_tokens": response.usage_metadata.get("input_tokens", 0),
+            "output_tokens": response.usage_metadata.get("output_tokens", 0),
+        }
+    return {"input_tokens": 0, "output_tokens": 0}
+
+
 # ── Node 0: Retrieve Memory ────────────────────────────────
 def retrieve_memory_node(state: AgentState) -> AgentState:
     """Search long-term memory for context relevant to the user's goal.
@@ -183,6 +198,7 @@ def plan_node(state: AgentState) -> AgentState:
         "tool_name": tool_name,
         "tool_input": tool_input,
         "ab_variant": ab_variant if ab_variant else state.get("ab_variant"),
+        "usage_log": state.get("usage_log", []) + [_extract_usage(response)],
         "messages": state["messages"] + [
             {"role": "assistant", "content": f"[Plan] {tool_name}: {reason}"}
         ],
@@ -313,7 +329,11 @@ def observe_node(state: AgentState) -> AgentState:
         ])
         content = response.content.strip()
 
-    new_state = {**state, "iterations": state["iterations"] + 1}
+    new_state = {
+        **state,
+        "iterations": state["iterations"] + 1,
+        "usage_log": state.get("usage_log", []) + [_extract_usage(response)],
+    }
 
     if content.upper().startswith("DONE:"):
         final_answer = content.split(":", 1)[1].strip()
@@ -442,8 +462,14 @@ def run_agent(
         "used_tools": [],
         "usage": {"input_tokens": 0, "output_tokens": 0, "provider": "", "model": "", "cost_usd": 0.0},
         "ab_variant": None,
+        "usage_log": [],
     }
     result = agent.invoke(initial_state)
+
+    # Sum tokens from every plan/observe LLM call this run made (see _extract_usage).
+    for entry in result.get("usage_log", []):
+        total_input_tokens += entry["input_tokens"]
+        total_output_tokens += entry["output_tokens"]
 
     # If the agent hit max iterations without producing an answer, synthesize one
     if not result.get("final_answer"):

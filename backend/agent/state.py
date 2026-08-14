@@ -18,3 +18,5 @@ class AgentState(TypedDict):
     used_tools: list[dict]      # History of tools called: [{"tool": "wikipedia", "input": "..."}]
     usage: dict                 # Token/cost tracking: {"input_tokens": int, "output_tokens": int, "provider": str, "model": str, "cost_usd": float}
     ab_variant: str | None      # 'A' or 'B' — set if an active A/B test was resolved
+    usage_log: list[dict]       # Per-LLM-call token usage from every plan/observe node call:
+                                 # [{"input_tokens": int, "output_tokens": int}, ...] — summed in run_agent()
