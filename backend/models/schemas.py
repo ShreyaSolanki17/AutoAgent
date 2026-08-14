@@ -9,6 +9,7 @@ from pydantic import BaseModel, EmailStr
 class ChatRequest(BaseModel):
     message: str
     history: list[dict] = []  # Previous messages: [{"role": "user"|"assistant", "content": "..."}]
+    debate: bool = False  # Multi-agent debate mode (needs all 3 provider keys, else falls back)
 
 
 class ChatResponse(BaseModel):

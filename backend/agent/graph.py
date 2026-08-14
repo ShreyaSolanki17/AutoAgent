@@ -391,8 +391,29 @@ def build_agent():
     return graph.compile()
 
 
-def run_agent(user_goal: str, user_id: str = "default", history: list[dict] | None = None) -> AgentState:
-    """Convenience function: build graph, run it, return final state with usage stats."""
+def run_agent(
+    user_goal: str,
+    user_id: str = "default",
+    history: list[dict] | None = None,
+    debate: bool = False,
+) -> AgentState:
+    """Convenience function: build graph, run it, return final state with usage stats.
+
+    If debate=True and all 3 PROVIDERS have API keys configured, routes into
+    the multi-agent debate pipeline (backend.agent.debate.run_debate) instead
+    of the normal ReAct loop below. Falls back to the normal loop — logging
+    why — if any provider key is missing, since a 2-way or 1-way "debate"
+    isn't a real debate.
+    """
+    if debate:
+        load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env", override=True)
+        missing = [p["name"] for p in PROVIDERS if not os.getenv(p["api_key_env"])]
+        if missing:
+            logger.warning("agent.debate_fallback_missing_keys", missing=missing)
+        else:
+            from backend.agent.debate import run_debate
+            return run_debate(user_goal, user_id=user_id)
+
     start_time = time.time()
     total_input_tokens = 0
     total_output_tokens = 0

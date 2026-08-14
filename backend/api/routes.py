@@ -144,7 +144,7 @@ async def chat(
         history_length=len(trimmed_history),
     )
 
-    result = run_agent(clean_message, user_id=current_user["id"], history=trimmed_history)
+    result = run_agent(clean_message, user_id=current_user["id"], history=trimmed_history, debate=request.debate)
 
     trace = [msg["content"] for msg in result.get("messages", [])]
 
@@ -167,15 +167,28 @@ async def chat(
     ).hexdigest()[:16]
 
     # ── LLM-as-judge evaluation (non-blocking — never breaks chat) ──
+    # Debate mode already ran its own comparative judge (judge_debate) — reuse
+    # those scores (averaged across the panel) instead of paying for a second
+    # evaluate_response() call on the same answer.
+    debate_info = result.get("debate")
     judge_scores = None
-    try:
-        judge_scores = evaluate_response(
-            user_goal=clean_message,
-            final_answer=filtered_answer,
-            trace=trace,
-        )
-    except Exception as e:
-        logger.warning("chat.judge_failed", error=str(e))
+    if debate_info:
+        panel = list(debate_info["judge_scores"].values())
+        if panel:
+            judge_scores = {
+                dim: round(sum(p.get(dim, 0.0) for p in panel) / len(panel), 3)
+                for dim in ("relevance", "accuracy", "helpfulness", "safety", "overall")
+            }
+            judge_scores["reasoning"] = debate_info["judge_reasoning"]
+    else:
+        try:
+            judge_scores = evaluate_response(
+                user_goal=clean_message,
+                final_answer=filtered_answer,
+                trace=trace,
+            )
+        except Exception as e:
+            logger.warning("chat.judge_failed", error=str(e))
 
     # ── Persist evaluation to DB (non-blocking — never breaks chat) ──
     trace_hash = compute_trace_hash(trace) if trace else None

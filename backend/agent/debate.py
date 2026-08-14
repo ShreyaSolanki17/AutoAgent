@@ -4,14 +4,18 @@ Step 2: independent candidate generation — each of the 3 configured
 providers answers the same query concurrently, with no visibility into
 each other's answers.
 
-Step 3 (current): critique round — each agent is shown the other two's
-answers and produces one revised answer. Capped at exactly 1 round.
+Step 3: critique round — each agent is shown the other two's answers and
+produces one revised answer. Capped at exactly 1 round.
 
-Later steps add: judge/synthesis, and graph wiring + triggering. Kept as
-a standalone module (not yet graph nodes) since it has nowhere to route
-to until those steps land.
+Step 4: judge/synthesis (backend.evaluation.judge.judge_debate) — scores
+the revised answers and synthesizes the final response.
+
+Step 5 (current): run_debate() chains all three into one call with a
+run_agent()-compatible return shape, so backend.agent.graph.run_agent()
+can route into it when debate=True.
 """
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from backend.config import PROVIDERS
@@ -134,3 +138,72 @@ def critique_round(user_goal: str, candidates: list[dict]) -> list[dict]:
         revised_by_provider.get(c["provider"], {**c, "revised_answer": "", "critique_error": c["error"]})
         for c in candidates
     ]
+
+
+def run_debate(user_goal: str, user_id: str = "default") -> dict:
+    """Run the full debate pipeline: independent generation -> critique -> judge.
+
+    Returns a dict shaped like graph.run_agent()'s return value (final_answer,
+    messages, iterations, used_tools, usage, ab_variant) so the /chat route
+    needs no mode-specific branching for those fields — plus a "debate" key
+    with the raw candidates/scores for callers that want the panel detail.
+    """
+    from backend.evaluation.judge import judge_debate  # local import: keeps the
+    # judge <-> debate module boundary one-directional (judge.py never imports debate.py)
+
+    start = time.time()
+    logger.info("debate.run_started", user_id=user_id, goal=user_goal[:100])
+
+    candidates = generate_candidates(user_goal)
+    revised = critique_round(user_goal, candidates)
+    judged = judge_debate(user_goal, revised)
+
+    messages = [
+        {"role": "assistant", "content": f"[Debate:{c['provider']}:initial] {c['answer'][:200] or c['error']}"}
+        for c in candidates
+    ] + [
+        {"role": "assistant", "content": f"[Debate:{r['provider']}:revised] {r['revised_answer'][:200]}"}
+        for r in revised
+    ]
+
+    if judged:
+        final_answer = judged["synthesized_answer"]
+        messages.append({"role": "assistant", "content": f"[Debate:judge] {judged['reasoning']}"})
+    else:
+        # Every candidate failed generation — genuinely nothing to judge or answer with.
+        final_answer = "All debate agents failed to respond. Please try again."
+        judged = {"scores": {}, "reasoning": "no candidates succeeded", "judge_model": "none"}
+
+    elapsed_ms = round((time.time() - start) * 1000)
+    logger.info(
+        "debate.run_completed",
+        user_id=user_id,
+        elapsed_ms=elapsed_ms,
+        succeeded=[c["provider"] for c in candidates if not c["error"]],
+    )
+
+    return {
+        "final_answer": final_answer,
+        "messages": messages,
+        "iterations": 1,
+        "used_tools": [],
+        "ab_variant": None,
+        "usage": {
+            # ponytail: token/cost accounting isn't wired up for debate calls yet —
+            # call_llm_as() discards each SDK response's usage_metadata. Real numbers
+            # get measured properly in Step 7, not guessed here.
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "provider": "debate",
+            "model": "+".join(p["name"] for p in PROVIDERS),
+            "cost_usd": 0.0,
+            "response_time_ms": elapsed_ms,
+        },
+        "debate": {
+            "candidates": candidates,
+            "revised": revised,
+            "judge_scores": judged["scores"],
+            "judge_reasoning": judged["reasoning"],
+            "judge_model": judged["judge_model"],
+        },
+    }
