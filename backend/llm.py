@@ -131,3 +131,34 @@ def call_llm(messages: list[dict[str, str]]) -> str:
         + f"\n\nSet at least one API key in .env: "
         + ", ".join(p["api_key_env"] for p in _PROVIDERS)
     )
+
+
+def call_llm_as(provider: dict, messages: list[dict[str, str]]) -> str:
+    """Call one specific provider directly — no fallback chain.
+
+    Used by debate mode, where all 3 providers must each be called
+    individually (and concurrently, by the caller) rather than tried in
+    fallback order until one succeeds.
+
+    Args:
+        provider: one entry from config.PROVIDERS.
+        messages: OpenAI-format chat messages.
+
+    Returns:
+        The model's response text.
+
+    Raises:
+        RuntimeError: if the provider's API key isn't configured, or the call fails.
+    """
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+
+    api_key = os.getenv(provider["api_key_env"])
+    if not api_key:
+        raise RuntimeError(f"{provider['name']}: no API key set ({provider['api_key_env']})")
+
+    try:
+        if provider["base_url"] is None:
+            return _call_groq(messages, api_key)
+        return _call_openai_compatible(messages, api_key, provider["model"], provider["base_url"])
+    except Exception as e:
+        raise RuntimeError(f"{provider['name']}: {e}") from e
