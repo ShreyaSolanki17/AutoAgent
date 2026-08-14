@@ -92,14 +92,7 @@ def evaluate_response(
             {"role": "user", "content": user_message},
         ])
 
-        # Parse JSON response — handle potential markdown fences
-        text = response.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            # Remove first line (```json) and last line (```)
-            text = "\n".join(lines[1:-1]).strip()
-
-        scores = json.loads(text)
+        scores = _parse_json_response(response)
 
         # Validate and clamp scores to [0.0, 1.0]
         for key in ("relevance", "accuracy", "helpfulness", "safety", "overall"):
@@ -158,3 +151,120 @@ def _summarize_trace(trace: list[str], max_chars: int = 500) -> str:
     if len(full) <= max_chars:
         return full
     return full[:max_chars] + "\n... (truncated)"
+
+
+def _parse_json_response(text: str) -> dict:
+    """Parse a judge LLM response as JSON, stripping markdown fences if present."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        text = "\n".join(lines[1:-1]).strip()
+    return json.loads(text)
+
+
+# ── Debate mode: comparative judge + synthesis ─────────────
+# Reuses the same 4-dimension rubric and JSON-output discipline as
+# evaluate_response() above, but scores 3 competing answers at once and
+# synthesizes a new final answer instead of scoring a single response.
+# This is one referee call, so — like evaluate_response() — it uses the
+# existing call_llm() fallback chain rather than a specific provider.
+
+DEBATE_JUDGE_SYSTEM_PROMPT = """You are an expert judge evaluating a multi-agent debate.
+Three independent AI experts each answered the same question, then revised
+their answer after seeing the other two experts' answers.
+
+Score each expert's revised answer on the same four dimensions used for
+single-response evaluation (0.0-1.0 scale):
+- RELEVANCE: Does it directly address the user's question?
+- ACCURACY: Is the information factually correct?
+- HELPFULNESS: Is it useful, appropriately detailed, and actionable?
+- SAFETY: Is it free from harmful, biased, or inappropriate content?
+
+Then write a synthesized final answer for the user — draw on the strongest
+points across all three experts. Only reuse one expert's answer verbatim if
+it is already clearly the best; otherwise combine their strengths.
+
+Respond with ONLY a valid JSON object (no markdown, no code fences):
+{
+  "scores": {
+    "<provider_name>": {"relevance": <float>, "accuracy": <float>, "helpfulness": <float>, "safety": <float>, "overall": <float>},
+    ...
+  },
+  "synthesized_answer": "<the final answer to give the user>",
+  "reasoning": "<1-2 sentences on how the experts' answers were weighed>"
+}
+
+Each "overall" should be: relevance*0.30 + accuracy*0.30 + helpfulness*0.25 + safety*0.15"""
+
+DEBATE_JUDGE_USER_TEMPLATE = """User's question:
+{user_goal}
+
+{candidates_text}
+
+Score each expert's answer and synthesize the best final answer."""
+
+
+def judge_debate(user_goal: str, candidates: list[dict]) -> dict | None:
+    """Score each debate candidate's revised answer and synthesize the final response.
+
+    Args:
+        user_goal: the original user question.
+        candidates: output of critique_round() — dicts with "provider" and
+            "revised_answer" (only ones with a non-empty revised_answer are judged).
+
+    Returns:
+        Dict: {"scores": {provider: {...4 dims + overall}}, "synthesized_answer",
+        "reasoning", "judge_model"}. Returns None only if there's nothing to
+        judge at all (no candidate produced an answer) — a judge call that
+        fails or returns bad JSON instead falls back to the first candidate's
+        revised answer verbatim, so debate mode always returns something.
+    """
+    valid = [c for c in candidates if c.get("revised_answer")]
+    if not valid:
+        logger.error("debate.judge_no_candidates")
+        return None
+
+    candidates_text = "\n\n".join(
+        f"{c['provider']}'s answer:\n{c['revised_answer']}" for c in valid
+    )
+    user_message = DEBATE_JUDGE_USER_TEMPLATE.format(
+        user_goal=user_goal[:1000],
+        candidates_text=candidates_text[:4000],
+    )
+
+    try:
+        response = call_llm([
+            {"role": "system", "content": DEBATE_JUDGE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ])
+        result = _parse_json_response(response)
+
+        scores = result.get("scores", {})
+        for provider_scores in scores.values():
+            for key in ("relevance", "accuracy", "helpfulness", "safety", "overall"):
+                if key in provider_scores and provider_scores[key] is not None:
+                    provider_scores[key] = max(0.0, min(1.0, float(provider_scores[key])))
+
+        synthesized = (result.get("synthesized_answer") or "").strip()
+        if not synthesized:
+            raise ValueError("judge returned empty synthesized_answer")
+
+        logger.info("debate.judge_complete", providers=list(scores.keys()))
+
+        return {
+            "scores": scores,
+            "synthesized_answer": synthesized,
+            "reasoning": result.get("reasoning", "No reasoning provided."),
+            "judge_model": "inline",
+        }
+
+    except Exception as e:
+        # Never let a flaky judge call kill debate mode — fall back to the
+        # first candidate's revised answer so the user still gets a response.
+        logger.error("debate.judge_failed_using_fallback", error=str(e))
+        return {
+            "scores": {},
+            "synthesized_answer": valid[0]["revised_answer"],
+            "reasoning": f"Judge failed ({e}); returned {valid[0]['provider']}'s answer unmodified.",
+            "judge_model": "fallback",
+        }

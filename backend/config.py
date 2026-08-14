@@ -16,7 +16,7 @@ PROVIDERS: list[dict] = [
     },
     {
         "name": "google",
-        "model": "gemini-2.0-flash",
+        "model": "gemini-2.5-flash",
         "api_key_env": "GOOGLE_API_KEY",
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
     },
