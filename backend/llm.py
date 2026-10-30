@@ -17,7 +17,9 @@ from dotenv import load_dotenv
 from groq import Groq
 
 from backend.logging_config import get_logger
-from backend.config import PROVIDERS, TEMPERATURE, MAX_TOKENS
+from backend.config import (
+    PROVIDERS, TEMPERATURE, MAX_TOKENS, LLM_TIMEOUT_SECONDS, LLM_MAX_RETRIES,
+)
 
 logger = get_logger(__name__)
 
@@ -32,7 +34,7 @@ _MAX_TOKENS = MAX_TOKENS
 
 def _groq_response(messages: list[dict[str, str]], api_key: str):
     """Call Groq API (native SDK), returning the raw response (text + usage)."""
-    client = Groq(api_key=api_key)
+    client = Groq(api_key=api_key, timeout=LLM_TIMEOUT_SECONDS, max_retries=LLM_MAX_RETRIES)
     return client.chat.completions.create(
         model="llama-3.3-70b-versatile",
         messages=messages,
@@ -55,7 +57,10 @@ def _openai_compatible_response(
     the raw response (text + usage)."""
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    client = OpenAI(
+        api_key=api_key, base_url=base_url,
+        timeout=LLM_TIMEOUT_SECONDS, max_retries=LLM_MAX_RETRIES,
+    )
     return client.chat.completions.create(
         model=model,
         messages=messages,

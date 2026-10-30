@@ -13,6 +13,7 @@ from pathlib import Path
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from backend.llm import call_llm, _PROVIDERS
+from backend.config import LLM_TIMEOUT_SECONDS, LLM_MAX_RETRIES
 
 
 class TestFallbackChain(unittest.TestCase):
@@ -33,7 +34,10 @@ class TestFallbackChain(unittest.TestCase):
             result = call_llm(self._fake_messages())
 
         self.assertEqual(result, "groq reply")
-        mock_groq.assert_called_once()
+        mock_groq.assert_called_once_with(
+            api_key="fake_groq_key", timeout=LLM_TIMEOUT_SECONDS,
+            max_retries=LLM_MAX_RETRIES,
+        )
 
     # ── Test 2: Groq fails → Google succeeds ──────────────────
     @patch("backend.llm.Groq")
@@ -53,6 +57,26 @@ class TestFallbackChain(unittest.TestCase):
             result = call_llm(self._fake_messages())
 
         self.assertEqual(result, "google reply")
+
+    @patch("backend.llm.load_dotenv")
+    @patch("openai.OpenAI")
+    @patch("backend.llm.Groq")
+    def test_timeout_switches_provider(self, mock_groq, mock_openai, mock_env):
+        client = mock_groq.return_value
+        client.chat.completions.create.side_effect = TimeoutError("timed out")
+        mock_openai.return_value.chat.completions.create.return_value.choices[0].message.content = "fallback reply"
+
+        with patch.dict(os.environ, {
+            "GROQ_API_KEY": "fake_groq_key",
+            "GOOGLE_API_KEY": "fake_google_key",
+        }, clear=True):
+            self.assertEqual(call_llm(self._fake_messages()), "fallback reply")
+
+        client.chat.completions.create.assert_called_once()
+        mock_openai.assert_called_once_with(
+            api_key="fake_google_key", base_url=_PROVIDERS[1]["base_url"],
+            timeout=LLM_TIMEOUT_SECONDS, max_retries=LLM_MAX_RETRIES,
+        )
 
     # ── Test 3: Groq + Google fail → OpenRouter succeeds ──────
     @patch("backend.llm.Groq")

@@ -45,7 +45,7 @@ def _get_llm() -> ChatGroq | ChatOpenAI:
     # Reload .env so key changes are picked up without server restart
     load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env", override=True)
 
-    from backend.config import TEMPERATURE, MAX_TOKENS
+    from backend.config import TEMPERATURE, MAX_TOKENS, LLM_TIMEOUT_SECONDS, LLM_MAX_RETRIES
 
     for provider in PROVIDERS:
         api_key = os.getenv(provider["api_key_env"])
@@ -58,6 +58,8 @@ def _get_llm() -> ChatGroq | ChatOpenAI:
                 model=provider["model"],
                 temperature=TEMPERATURE,
                 max_tokens=MAX_TOKENS,
+                timeout=LLM_TIMEOUT_SECONDS,
+                max_retries=LLM_MAX_RETRIES,
             )
         else:
             # Google / OpenRouter — OpenAI-compatible via langchain-openai
@@ -65,6 +67,8 @@ def _get_llm() -> ChatGroq | ChatOpenAI:
                 model=provider["model"],
                 temperature=TEMPERATURE,
                 max_tokens=MAX_TOKENS,
+                timeout=LLM_TIMEOUT_SECONDS,
+                max_retries=LLM_MAX_RETRIES,
                 api_key=api_key,
                 base_url=provider["base_url"],
             )

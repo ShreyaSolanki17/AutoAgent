@@ -31,6 +31,9 @@ PROVIDERS: list[dict] = [
 # ── LLM Generation Params ─────────────────────────────────
 TEMPERATURE: float = 0.1
 MAX_TOKENS: int = 4096
+# Bound SDK waits and let the application handle provider fallback.
+LLM_TIMEOUT_SECONDS: float = 20.0
+LLM_MAX_RETRIES: int = 0
 
 # ── Agent Loop Limits ──────────────────────────────────────
 MAX_ITERATIONS: int = 3
